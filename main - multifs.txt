@@ -1,0 +1,1634 @@
+/***** Includes *****/
+
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include "mxc_device.h"
+
+
+
+#include "mxc_sys.h"
+#include "mxc_delay.h"
+#include "mxc_errors.h"
+#include "sdhc_regs.h"
+#include "led.h"
+#include "tmr.h"
+#include "uart.h"
+#include "gpio.h"
+#include "board.h"
+
+
+
+
+#include "nvic_table.h"
+#include "spi.h"
+#include "i2c.h"
+#include "sdhc_regs.h"
+#include "sdhc_lib.h"
+#include "ff.h"
+#include "utils.h"
+#include "dma.h"
+#include "arm_math.h"
+
+
+
+
+
+
+
+
+
+
+#include "./periphDirectAccess.txt"
+
+
+// make sure the following is set BEFORE including the decimation filter code
+//#define UNALIGNED_SUPPORT_DISABLE
+
+//#include "arm_fir_decimate_fast_q15_bob.h"
+#include "arm_fir_decimate_fast_q31_bob.h"
+
+
+/***** #defines  *****/
+
+
+// set recording mode to either 48K/16 bit or 384k/24 bit
+// note that the ADC runs at 384K all the time; in the 48K case, we decimate digitall//
+#define FS48K_16BIT
+//#define FS384K_24BIT
+// RECORDING TIME IN DMA Blocks (each DMA block is 21.33 ms)
+
+#define RECORDING_TIME_DMABLOCKS 1000
+
+
+//Pin 0.20 for ADC clock enable or disable
+
+#define MXC_SPI2_SSIDX 0
+
+//****************************************************************
+//SPI defines for SPI1 slave
+//****************************************************************
+
+#define SPI_MASTER_IRQ SPI1_IRQn
+
+
+// defines for DMA
+#define DMA_buffLen 8192 // 24-bit words (not bytes) error, not diviible by 12 or 24 for 32k and 16k sample-rates
+//#define DMA_buffLen 8256 // 24-bit words (not bytes), note this is divisible by 2,4,8,12 and 24 for all sample-rates
+
+#define DMA_buffLen_bytes 3*DMA_buffLen //in  bytes, = 8K 24-bit words;after decimation, = 1K 48KHz words).
+
+#define buffLen_deci2x DMA_buffLen/2 // after 2x decimation 192k mode
+#define buffLen_deci4x DMA_buffLen/4 // after 4x decimation 96k mode
+#define buffLen_deci8x DMA_buffLen/8 // after 8x decimation 48 k mode
+#define buffLen_deci12x DMA_buffLen/12 // after 12x decimation, 32 k mode
+#define buffLen_deci16x DMA_buffLen/16 // after 16x decimation, 24k mode
+#define buffLen_deci24x DMA_buffLen/24 // after 24x decimation, 16 k mode
+
+//
+//
+//// 16 k
+//#define deci_16k_numcoeffs_0 5
+//#define deci_16k_numcoeffs_1 7
+//#define deci_16k_numcoeffs_2 9
+//#define deci_16k_numcoeffs_3 47
+//#define deci_state_len_16k_0 DMA_buffLen + deci_16k_numcoeffs_0 -1
+//#define deci_state_len_16k_1 buffLen_deci2x + deci_16k_numcoeffs_1 -1
+//#define deci_state_len_16k_2 buffLen_deci4x + deci_16k_numcoeffs_2 -1
+//#define deci_state_len_16k_3 buffLen_deci8x + deci_16k_numcoeffs_3 -1
+//
+//// 24 k
+//#define deci_24k_numcoeffs_0 5
+//#define deci_24k_numcoeffs_1 7
+//#define deci_24k_numcoeffs_2 9
+//#define deci_24k_numcoeffs_3 33
+//#define deci_state_len_24k_0 DMA_buffLen + deci_24k_numcoeffs_0 -1
+//#define deci_state_len_24k_1 buffLen_deci2x + deci_24k_numcoeffs_1 -1
+//#define deci_state_len_24k_2 buffLen_deci4x + deci_24k_numcoeffs_2 -1
+//#define deci_state_len_24k_3 buffLen_deci8x + deci_24k_numcoeffs_3 -1
+//
+//// 32 k
+//#define deci_32k_numcoeffs_0 7
+//#define deci_32k_numcoeffs_1 9
+//#define deci_32k_numcoeffs_2 47
+//#define deci_state_len_32k_0 DMA_buffLen + deci_32k_numcoeffs_0 -1
+//#define deci_state_len_32k_1 buffLen_deci2x + deci_32k_numcoeffs_1 -1
+//#define deci_state_len_32k_2 buffLen_deci4x + deci_32k_numcoeffs_2 -1
+
+// 48 k
+#define deci_48k_numcoeffs_0 7
+#define deci_48k_numcoeffs_1 9
+#define deci_48k_numcoeffs_2 33
+#define deci_state_len_48k_0 DMA_buffLen + deci_48k_numcoeffs_0 -1
+#define deci_state_len_48k_1 buffLen_deci2x + deci_48k_numcoeffs_1 -1
+#define deci_state_len_48k_2 buffLen_deci4x + deci_48k_numcoeffs_2 -1
+
+// 96 k
+//
+//#define deci_96k_numcoeffs_0 9
+//#define deci_96k_numcoeffs_1 33
+//#define deci_state_len_96k_0 DMA_buffLen + deci_96k_numcoeffs_0 -1
+//#define deci_state_len_96k_1 buffLen_deci2x + deci_96k_numcoeffs_1 -1
+//
+//// 192 k
+//#define deci_192k_numcoeffs_0 31
+//#define deci_state_len_192k_0 DMA_buffLen + deci_192k_numcoeffs_0 -1
+
+
+// I2C defines
+#define I2C_MASTER MXC_I2C0_BUS0
+#define I2C_SLAVE_ADDR (0x98) // for a write, read is 99
+#define I2C_BYTES 2
+#define I2C_FREQ 100000
+
+
+// ************************ ADC/SPI Defines *******************
+
+
+#define AD463X_REG_EXIT_CFG_MODE	0x14
+#define AD463X_REG_MODES		0x20
+#define AD463X_REG_OSCILATOR		0x21
+#define AD463X_EXIT_CFG_MODE		NO_OS_BIT(0)
+#define AD463X_REG_READ_DUMMY		0x00
+#define AD463X_REG_READ		    	NO_OS_BIT(7)
+
+// Error codes used in the Secure CRT functions
+
+#define _SECURECRT_ERRCODE_VALUES_DEFINED
+#define EINVAL          22
+#define ERANGE          34
+#define EILSEQ          42
+#define STRUNCATE       80
+
+
+
+
+
+//****************************************************************
+//GPIO defines for ADC
+//****************************************************************
+//For the CS pin while using the SPI2 on the FTHR
+#define MXC_GPIO_PORT_OUT0 MXC_GPIO0
+
+// bit-bang slave-sel during ADC init
+#define MXC_GPIO_PIN_OUT16 MXC_GPIO_PIN_16
+
+//Pin 0.20 used for enabling and disabling CNV start signal through 74LV4060
+#define MXC_GPIO_PIN_OUT20 MXC_GPIO_PIN_20
+
+//Pin 0.21 use for hardware reset
+#define MXC_GPIO_PIN_OUT21 MXC_GPIO_PIN_21
+
+#define MXC_GPIO_PIN_OUT5 MXC_GPIO_PIN_5  // gpio5, pin 6 on feather, green LED on motherboard
+
+#define MXC_GPIO_PIN_OUT3 MXC_GPIO_PIN_3  // gpio3, pin 5 on feather, blue led on motherboard
+
+#define MXC_GPIO_PIN_OUT4 MXC_GPIO_PIN_4  // gpio4, pin 7 on feather
+
+#define MXC_GPIO_PIN_OUT12 MXC_GPIO_PIN_12  // gpio12, pin 4 on feather connected to pin 6 of p8 header, used for timing code
+
+#define MXC_GPIO_PIN_OUT30  MXC_GPIO_PIN_30 //Blue LED on FTHR board (not motherboard!)
+
+
+
+
+// Parameters for PWM output
+#define PORT_PWM MXC_GPIO0 //port
+#define PIN_PWM MXC_GPIO_PIN_12 //pin
+#define FREQ 200000 // (Hz)
+#define DUTY_CYCLE 75 // (%)
+#define PWM_TIMER MXC_TMR0 // must change PWM_PORT and PWM_PIN if changed
+
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
+#define MAXLEN 256
+
+
+#define WAV_HEADER_SIZE 44
+#define WAV_BLOCK_SIZE 512
+
+
+
+
+//#define testWriteLen 32768
+
+
+
+/***** Globals *****/
+
+
+
+
+// structs for spi,gpio
+
+
+mxc_gpio_cfg_t gpio_out16;
+mxc_gpio_cfg_t gpio_out20; // adc clock enable
+mxc_gpio_cfg_t gpio_out5; //pin 6 on feather, green LED on motherboard
+mxc_gpio_cfg_t gpio_in3; // pin 5 on feather, blue led on motherboard
+
+mxc_gpio_cfg_t gpio_in30; // the blue LED on feather (not on motherboard!)
+mxc_gpio_cfg_t gpio_out12; // pin 4 on feather, used for timing etsts
+
+// structs for spi port
+mxc_spi_req_t SPI2_req_master_ctrl_write; // use this struct when using spi2 to write to the adc control port
+mxc_spi_req_t SPI1_req; // struct for SPI int
+
+
+typedef enum {
+		fs_384k,
+		fs_192k,
+		fs_96k,
+		fs_48k,
+		fs_32k,
+		fs_24k,
+		fs_16k
+} FS; // this is a variable 'type'
+
+
+static FS magpie_FS;
+
+static uint32_t numWordsSDwrite = 0u;
+
+volatile uint32_t count_dma_irq = 0;
+volatile uint32_t dataBlocksDmaCount=0,dataBlocksConsumedCount=0;
+volatile uint8_t dataBlockWriteComplete=1; // init to 1 so the first dma interupt will work
+//volatile FSIZE_t file_pos64 = 0;
+volatile uint32_t writeNotComplete = 0;
+static uint8_t bigDMAbuff[16*3*DMA_buffLen] = {0}; // up to 16 sd card dma interval stalls
+
+
+FATFS *fs; //FFat Filesystem Object
+FATFS fs_obj;
+FIL file; //FFat File Object
+FRESULT err; //FFat Result (Struct)
+FILINFO fno; //FFat File Information Object
+DIR dir; //FFat Directory Object
+TCHAR message[32768];
+WORD message1[32768];
+TCHAR directory[MAXLEN], cwd[MAXLEN], filename[MAXLEN], volume_label[24],
+volume = '0';
+TCHAR *FF_ERRORS[20];
+uint32_t clusters_free = 0, sectors_free = 0, sectors_total = 0, volume_sn = 0;
+UINT bytes_written = 0, bytes_read = 0, mounted = 0;
+BYTE work[4096];
+//static uint8_t ADCdata[testWriteLen];
+
+
+
+
+
+// global DMA var
+static uint8_t dmaDestBuff[DMA_buffLen_bytes] = {0}; // bytes transferred here from the dma
+//static uint8_t dmaDestBuffCopy[DMA_buffLen_bytes] = {0}; // will need to be longer for SD card stalls!
+
+
+static q15_t dmaDestBuff_16bit[DMA_buffLen] = {0}; // same data but assembled back into 16-bit words
+static q31_t dmaDestBuff_32bit[DMA_buffLen] = {0}; // same data but assembled back into 32-bit words
+
+int mychannel = -1;
+
+
+
+// 32-bit vars. To keep things sinple, the DMS always receives 24 bits, and is filtered
+// using 32-bit cmsis routines to prevent extra quantizayion noise
+// after filtering we can decide to use 16 or 24 bits to write to the sd
+// note the 384KHz mode skips the fiters
+// input buffers loaded by SPI ISR routine
+// decimated buffers
+static q31_t dma_rx_deci_2x[buffLen_deci2x] = {0}; // 1st 2X decimator output -> 192k
+static q31_t dma_rx_deci_4x[buffLen_deci4x] = {0}; // 2nd 2X decimator -> 96k
+static q31_t dma_rx_deci_8x[buffLen_deci8x] = {0}; // 3rd 2X decimator -> 48k
+static q31_t dma_rx_deci_12x[buffLen_deci12x] = {0}; // 3rd 3X decimator, 32k mode
+static q31_t dma_rx_deci_16x[buffLen_deci16x] = {0}; // 4th 2X decimator -> 24k
+static q31_t dma_rx_deci_24x[buffLen_deci24x] = {0}; //4th 3X decimator, 16k mode
+
+static q15_t dma_rx_deci_16bits_4k[buffLen_deci2x] = {0};
+static q15_t dma_rx_deci_16bits_8x[buffLen_deci8x] = {0}; // debug
+
+// largest size for min 192K 2:1 decimation is 4k 16-bit words
+// other sampe rates will only partilally fill this array, and fwrite will write only the bytes needed
+
+//
+//
+//// note, 1st stage coeffcients have -3dB loss to avoid wrap-around in case of filter overshoot on a transient edge
+//static q31_t firCoeffs_stage0[decimate_2x_fir_numcoeffs0] = {
+//-42201666,18023525,423595866,727113801,423595866,18023525,-42201666};
+//
+//static q31_t firCoeffs_stage1[decimate_2x_fir_numcoeffs1] = {
+//-35829136,-93392547,90204797,624894336,955274946,624894336,90204797,-93392547,-35829136};
+//
+//static q31_t firCoeffs_stage2[decimate_2x_fir_numcoeffs2] = {
+//-2823963,804105,13756249,13832557,-12099816,-21810016,17681236,39284877,-22118934,-66381589,26258540,112809109,-29540929,-212849373,31655722,678451831,1041361918,678451831,31655722,-212849373,-29540929,112809109,26258540,-66381589,-22118934,39284877,17681236,-21810016,-12099816,13832557,13756249,804105,-2823963};
+//
+//
+//
+//// the decimation filter state registers, required by the CMSIS routines
+//static q31_t firState_stage0[decimate_fir_state_len0] = {0};
+//static q31_t firState_stage1[decimate_fir_state_len1] = {0};
+//static q31_t firState_stage2[decimate_fir_state_len2] = {0};
+//
+
+
+// decimation filter coefficients, to be placed in global
+
+//
+//// 16 k
+//static q31_t firCoeffs_16k_0[deci_16k_numcoeffs_0] = {
+//86385383, 380767973, 588547483, 380767973, 86385383};
+//static q31_t firCoeffs_16k_1[deci_16k_numcoeffs_1] = {
+//-63623254, 11777617, 601023485, 1051356664, 601023485, 11777617, -63623254};
+//static q31_t firCoeffs_16k_2[deci_16k_numcoeffs_2] = {
+//-27728029, -77658950, 90916825, 613537738, 945568961, 613537738, 90916825, -77658950, -27728029};
+//static q31_t firCoeffs_16k_3[deci_16k_numcoeffs_3] = {
+//544679, 5591621, 10519170, 11396576, 3740919, -9199321, -16459240, -8186184, 12423382, 27105429, 17140829, -15659956, -43184586, -32667249, 18552286, 68866053, 61256147, -20863109, -119392334, -129148756, 22338651, 303309288, 578589578, 692986716, 578589578, 303309288, 22338651, -129148756, -119392334, -20863109, 61256147, 68866053, 18552286, -32667249, -43184586, -15659956, 17140829, 27105429, 12423382, -8186184, -16459240, -9199321, 3740919, 11396576, 10519170, 5591621, 544679};
+//
+//
+//// 24k
+//
+//
+//static q31_t firCoeffs_24k_0[deci_24k_numcoeffs_0] = {
+//87026071, 382177371, 589816446, 382177371, 87026071};
+//static q31_t firCoeffs_24k_1[deci_24k_numcoeffs_1] = {
+//-59682168, 25489114, 599055019, 1028294198, 599055019, 25489114, -59682168};
+//static q31_t firCoeffs_24k_2[deci_24k_numcoeffs_2] = {
+//-35829136, -93392547, 90204797, 624894336, 955274946, 624894336, 90204797, -93392547, -35829136};
+//static q31_t firCoeffs_24k_3[deci_24k_numcoeffs_3] = {
+//-2823963, 804105, 13756249, 13832557, -12099816, -21810016, 17681236, 39284877, -22118934, -66381589, 26258540, 112809109, -29540929, -212849373, 31655722, 678451831, 1041361918, 678451831, 31655722, -212849373, -29540929, 112809109, 26258540, -66381589, -22118934, 39284877, 17681236, -21810016, -12099816, 13832557, 13756249, 804105, -2823963};
+//
+//// 32 k
+//
+//static q31_t firCoeffs_32k_0[deci_32k_numcoeffs_0] = {
+//-44988434, 8328033, 424987782, 743421426, 424987782, 8328033, -44988434};
+//static q31_t firCoeffs_32k_1[deci_32k_numcoeffs_1] = {
+//-27728029, -77658950, 90916825, 613537738, 945568961, 613537738, 90916825, -77658950, -27728029};
+//static q31_t firCoeffs_32k_2[deci_32k_numcoeffs_2] = {
+//544679, 5591621, 10519170, 11396576, 3740919, -9199321, -16459240, -8186184, 12423382, 27105429, 17140829, -15659956, -43184586, -32667249, 18552286, 68866053, 61256147, -20863109, -119392334, -129148756, 22338651, 303309288, 578589578, 692986716, 578589578, 303309288, 22338651, -129148756, -119392334, -20863109, 61256147, 68866053, 18552286, -32667249, -43184586, -15659956, 17140829, 27105429, 12423382, -8186184, -16459240, -9199321, 3740919, 11396576, 10519170, 5591621, 544679};
+
+// 48 k
+
+static q31_t firCoeffs_48k_0[deci_48k_numcoeffs_0] = {
+-42201666, 18023525, 423595866, 727113801, 423595866, 18023525, -42201666};
+static q31_t firCoeffs_48k_1[deci_48k_numcoeffs_1] = {
+-35829136, -93392547, 90204797, 624894336, 955274946, 624894336, 90204797, -93392547, -35829136};
+static q31_t firCoeffs_48k_2[deci_48k_numcoeffs_2] = {
+-2823963, 804105, 13756249, 13832557, -12099816, -21810016, 17681236, 39284877, -22118934, -66381589, 26258540, 112809109, -29540929, -212849373, 31655722, 678451831, 1041361918, 678451831, 31655722, -212849373, -29540929, 112809109, 26258540, -66381589, -22118934, 39284877, 17681236, -21810016, -12099816, 13832557, 13756249, 804105, -2823963};
+
+
+
+//
+//// 96 k
+//
+//
+//static q31_t firCoeffs_96k_0[deci_96k_numcoeffs_0] = {
+//-20749647, -66609278, 51582801, 442242045, 691682165, 442242045, 51582801, -66609278, -20749647};
+//static q31_t firCoeffs_96k_1[deci_96k_numcoeffs_1] = {
+//-3229201, 1658598, 16721610, 16330065, -12855261, -23661054, 18450717, 41258441, -22628821, -68277309, 26456118, 114386501, -29451143, -213892037, 31368109, 678814008, 1041713732, 678814008, 31368109, -213892037, -29451143, 114386501, 26456118, -68277309, -22628821, 41258441, 18450717, -23661054, -12855261, 16330065, 16721610, 1658598, -3229201};
+//
+//// 192 k
+//static q31_t firCoeffs_192k_0[deci_192k_numcoeffs_0] = {
+//1361586, 10557827, 10709748, -7937935, -16891453, 10698010, 28948212, -13340704, -48092067, 15657889, 80728942, -17475797, -151136216, 18649367, 479952574, 740192570, 479952574, 18649367, -151136216, -17475797, 80728942, 15657889, -48092067, -13340704, 28948212, 10698010, -16891453, -7937935, 10709748, 10557827, 1361586};
+//
+
+
+
+
+// filter state varaiables, to be placed in global
+//
+//// 16 k
+//static q31_t firState_16k_0[deci_state_len_16k_0] = {0};
+//static q31_t firState_16k_1[deci_state_len_16k_1] = {0};
+//static q31_t firState_16k_2[deci_state_len_16k_2] = {0};
+//static q31_t firState_16k_3[deci_state_len_16k_3] = {0};
+//
+//// 24 k
+//static q31_t firState_24k_0[deci_state_len_24k_0] = {0};
+//static q31_t firState_24k_1[deci_state_len_24k_1] = {0};
+//static q31_t firState_24k_2[deci_state_len_24k_2] = {0};
+//static q31_t firState_24k_3[deci_state_len_24k_3] = {0};
+//
+//// 32 k
+//static q31_t firState_32k_0[deci_state_len_32k_0] = {0};
+//static q31_t firState_32k_1[deci_state_len_32k_1] = {0};
+//static q31_t firState_32k_2[deci_state_len_32k_2] = {0};
+
+// 48 k
+
+static q31_t firState_48k_0[deci_state_len_48k_0] = {0};
+static q31_t firState_48k_1[deci_state_len_48k_1] = {0};
+static q31_t firState_48k_2[deci_state_len_48k_2] = {0};
+
+// 96 k
+//
+//static q31_t firState_96k_0[deci_state_len_96k_0] = {0};
+//static q31_t firState_96k_1[deci_state_len_96k_1] = {0};
+//
+//// 192 k
+//static q31_t firState_192k_0[deci_state_len_192k_0] = {0};
+
+
+
+
+static signed long int ozone_scope_var=0;
+
+uint32_t getFifo=0;
+int location = 0;
+volatile uint32_t delta=0;
+static uint32_t deltaMax=0,deltaMaxi=0;
+static uint32_t deltaTrace[256] = {0};
+static uint32_t deltaTracei[256] = {0};
+
+
+static uint32_t blockPtrModulo=0;
+static uint32_t offset = 0;
+static uint32_t blockPtrModuloDMA=0;
+static uint32_t offsetDMA = 0;
+
+uint8_t SPI1_rx_3byte[3];
+
+//static q15_t spi_data_q15; // use for 16-bit
+
+// I2C variables
+static uint8_t i2cErr=0;
+static int I2C_FLAG=0;
+
+static uint8_t i2c_txdata[I2C_BYTES] = {0x1};
+static uint8_t i2c_rxdata[I2C_BYTES] = {0x1};
+
+
+// debug variables
+// use volatile so compiler does not optimize these variables away when using -o2
+volatile uint32_t debug0=0,debug1=0,debug2=0,debug3 = 0;
+//static uint32_t temp0=0,temp1=0,temp2=0,temp3=0;
+volatile uint32_t temp0=0,temp1=0,temp2=0,temp3=0;
+volatile uint32_t errCount=0;
+
+
+// function prototypes
+
+
+
+// CMSIS instances. Note that the "fast" version
+// uses the same structure as the regular version
+//arm_fir_decimate_instance_q31 Sdeci_2x_0;
+//arm_fir_decimate_instance_q31 Sdeci_2x_1;
+//arm_fir_decimate_instance_q31 Sdeci_2x_2;
+//
+//// 16 k
+//arm_fir_decimate_instance_q31 Sdeci_16k_0;
+//arm_fir_decimate_instance_q31 Sdeci_16k_1;
+//arm_fir_decimate_instance_q31 Sdeci_16k_2;
+//arm_fir_decimate_instance_q31 Sdeci_16k_3;
+//
+//// 24 k
+//arm_fir_decimate_instance_q31 Sdeci_24k_0;
+//arm_fir_decimate_instance_q31 Sdeci_24k_1;
+//arm_fir_decimate_instance_q31 Sdeci_24k_2;
+//arm_fir_decimate_instance_q31 Sdeci_24k_3;
+//
+//// 32 k
+//
+//arm_fir_decimate_instance_q31 Sdeci_32k_0;
+//arm_fir_decimate_instance_q31 Sdeci_32k_1;
+//arm_fir_decimate_instance_q31 Sdeci_32k_2;
+
+// 48 k
+
+arm_fir_decimate_instance_q31 Sdeci_48k_0;
+arm_fir_decimate_instance_q31 Sdeci_48k_1;
+arm_fir_decimate_instance_q31 Sdeci_48k_2;
+
+//
+//// 96 k
+//
+//arm_fir_decimate_instance_q31 Sdeci_96k_0;
+//arm_fir_decimate_instance_q31 Sdeci_96k_1;
+//
+//// 192 k
+//
+//arm_fir_decimate_instance_q31 Sdeci_192k_0;
+
+
+
+
+// *********** start functions *******************
+
+
+
+int mount()
+{
+	fs = &fs_obj;
+	if ((err = f_mount(fs, "", 1)) != FR_OK) { //Mount the default drive to fs now
+		debug1=20;
+		//printf("Error opening SD card: %s\n", FF_ERRORS[err]);
+		f_mount(NULL, "", 0);
+	} else {
+		debug1=22;
+		//printf("SD card mounted.\n");
+		mounted = 1;
+	}
+
+	f_getcwd(cwd, sizeof(cwd)); //Set the Current working directory
+
+	return err;
+}
+
+int umount()
+{
+	if ((err = f_mount(NULL, "", 0)) != FR_OK) { //Unmount the default drive from its mount point
+		printf("Error unmounting volume: %s\n", FF_ERRORS[err]);
+	} else {
+		printf("SD card unmounted.\n");
+		mounted = 0;
+	}
+
+	return err;
+}
+
+
+
+
+
+
+
+//
+//uint8_t AudioFiles_WriteHeader(FIL* MyFile)
+//{
+//
+//	UINT bw;
+//	uint32_t FileEndPointer;
+//	volatile uint8_t SampleRateByte;
+//	volatile uint32_t SampleRateWord;
+//
+//	BYTE WAVFileHeader[46] =
+//	{
+//			0x52, 0x49, 0x46, 0x46, //Bytes 1 - 4: "RIFF"
+//			0x00, 0x00, 0x00, 0x00, //Bytes 5 - 8: ((Size of overall file) - 8)
+//			0x57, 0x41, 0x56, 0x45, //Bytes 9 - 12: "WAVE"
+//			0x66, 0x6D, 0x74, 0x20, //Bytes 13 - 16: Format Chunk Marker i.e. "fmt "
+//			0x12, 0x00, 0x00, 0x00, //Bytes 17 - 20: Length of format data (18 DECIMAL)
+//			0x01, 0x00, 0x01, 0x00, //Bytes 21 - 22: Type of format (1 for PCM) Bytes 23 - 24: Number of channels (1 or mono)
+//			0x40, 0x1F, 0x00, 0x00, //Bytes 25 - 28: Sample Rate
+//			0x80, 0x3E, 0x00, 0x00, //Bytes 29 - 32: ((SampleRate * BitsPerSample * Channels)/8) i.e. 16000
+//			0x02, 0x00, 0x10, 0x00, //Bytes 33 - 34: ((Channels * BitsPerSample)/8) i.e. 2 Bytes 35 - 36: Bits Per Sample (16)
+//			0x00, 0x00,             //Bytes 37 - 38: I dont know why these two bytes are added
+//			0x64, 0x61, 0x74, 0x61, //Bytes 39 - 42: "data" chunk header i.e. "data"
+//			0x00, 0x20, 0x04, 0x00  //Bytes 43 - 46: Size of data section (Number DOES INCLUDE these four bytes)
+//	};
+//
+//	SampleRateWord = 0x0005DC00; //384KHz (Big Endian format)
+//
+//// ((Size of overall file) - 8)  Bytes 5-8
+//	WAVFileHeader[4] = (BYTE)((MyFile->obj.objsize - 8) & 0xFF);
+//	WAVFileHeader[5] = (BYTE)(((MyFile->obj.objsize - 8) >> 8) & 0xFF);
+//	WAVFileHeader[6] = (BYTE)(((MyFile->obj.objsize - 8) >> 16) & 0xFF);
+//	WAVFileHeader[7] = (BYTE)(((MyFile->obj.objsize - 8) >> 24) & 0xFF);
+//
+//
+////Sample rate Bytes 25-28
+//	WAVFileHeader[24] = (BYTE)((SampleRateWord) & 0xFF);
+//	WAVFileHeader[25] = (BYTE)(((SampleRateWord) >> 8) & 0xFF);
+//	WAVFileHeader[26] = (BYTE)(((SampleRateWord) >> 16) & 0xFF);
+//	WAVFileHeader[27] = (BYTE)(((SampleRateWord) >> 24) & 0xFF);
+//
+//	SampleRateWord = ((SampleRateWord * 16) >> 3); //Shifting Right by three is the same as dividing by 8
+//
+////Byte rate Bytes 29-32
+//	WAVFileHeader[28] = (BYTE)((SampleRateWord) & 0xFF);
+//	WAVFileHeader[29] = (BYTE)(((SampleRateWord) >> 8) & 0xFF);
+//	WAVFileHeader[30] = (BYTE)(((SampleRateWord) >> 16) & 0xFF);
+//	WAVFileHeader[31] = (BYTE)(((SampleRateWord) >> 24) & 0xFF);
+//
+//
+//	WAVFileHeader[42] = (BYTE)((MyFile->obj.objsize - 46) & 0xFF);
+//	WAVFileHeader[43] = (BYTE)(((MyFile->obj.objsize - 46) >> 8) & 0xFF);
+//	WAVFileHeader[44] = (BYTE)(((MyFile->obj.objsize - 46) >> 16) & 0xFF);
+//	WAVFileHeader[45] = (BYTE)(((MyFile->obj.objsize - 46) >> 24) & 0xFF);
+//
+//	FileEndPointer = MyFile->obj.objsize;
+//
+//	  err = f_lseek(MyFile, 0);
+//	  if (err != FR_OK)
+//	  {
+//		return 1; //ERROR
+//	  }
+//
+//	  err = f_write(MyFile, WAVFileHeader, 46, &bw);
+//	  if (err != FR_OK)
+//	  {
+//		return 1; //ERROR
+//	  }
+//
+//	  err = f_lseek(MyFile, FileEndPointer);
+//	  if (err != FR_OK)
+//	  {
+//		return 1; //ERROR
+//	  }
+//
+//	  return 0;
+//}
+//
+//
+//
+//
+//
+//void PWMTimer()
+//{
+//    // Declare variables
+//    mxc_gpio_cfg_t gpio_pwm; //to configure GPIO
+//    mxc_tmr_cfg_t tmr; // to configure timer
+//    unsigned int periodTicks = PeripheralClock / FREQ;
+//    unsigned int dutyTicks = periodTicks * DUTY_CYCLE / 100;
+//    debug1 = dutyTicks;
+//    debug2 = periodTicks;
+//
+//    // Congfigure GPIO port and pin for PWM
+//    gpio_pwm.port = PORT_PWM;
+//    gpio_pwm.mask = PIN_PWM;
+//    gpio_pwm.pad = MXC_GPIO_PAD_PULL_DOWN;
+//    gpio_pwm.func = MXC_GPIO_FUNC_ALT4;
+//    MXC_GPIO_Config(&gpio_pwm);
+//
+//    /*
+//    Steps for configuring a timer for PWM mode:
+//    1. Disable the timer
+//    2. Set the pre-scale value
+//    3. Set polarity, PWM parameters
+//    4. Configure the timer for PWM mode
+//    5. Enable Timer
+//    */
+//
+//    MXC_TMR_Shutdown(PWM_TIMER);
+//
+//    tmr.pres = TMR_PRES_1;
+//    tmr.mode = TMR_MODE_PWM;
+//    tmr.cmp_cnt = periodTicks;
+//    tmr.pol = 1;
+//
+//    MXC_TMR_Init(PWM_TIMER, &tmr);
+//
+//    if (MXC_TMR_SetPWM(PWM_TIMER, dutyTicks) != E_NO_ERROR) {
+//        //printf("Failed TMR_PWMConfig.\n");
+//    }
+//
+//    MXC_TMR_Start(PWM_TIMER);
+//
+//}
+//
+//
+//
+//void read_TMR0_regs() // for debug only
+//{
+//	//TMR0_CNT_direct_probe =  TMR0_CNT_direct;
+//	TMR0_CMP_direct_probe =  TMR0_CMP_direct;
+//	TMR0_PWM_direct_probe =  TMR0_PWM_direct;
+//	//TMR0_INTR_direct_probe =  TMR0_INTR_direct;
+//	//TMR0_CN_direct_probe =  TMR0_CN_direct;
+//	//TMR0_NOLCMP_direct_probe =  TMR0_NOLCMP_direct;
+//}
+//
+
+
+
+void read_SPI1_regs() // for debug only
+{
+	// note, these appear in the same order as in the user guide
+	SPI1_DATA0_direct_probe =  SPI1_DATA0_direct;
+	SPI1_CTRL0_direct_probe =  SPI1_CTRL0_direct;
+	SPI1_CTRL1_direct_probe =  SPI1_CTRL1_direct;
+	SPI1_CTRL2_direct_probe =  SPI1_CTRL2_direct;
+	SPI1_SS_TIME_direct_probe =  SPI1_SS_TIME_direct;
+	SPI1_CLK_CFG_direct_probe =  SPI1_CLK_CFG_direct;
+	SPI1_DMA_direct_probe =  SPI1_DMA_direct;
+	SPI1_INT_FL_direct_probe =  SPI1_INT_FL_direct;
+	SPI1_INT_EN_direct_probe =  SPI1_INT_EN_direct;
+	SPI1_WAKE_FL_direct_probe =  SPI1_WAKE_FL_direct;
+	SPI1_WAKE_EN_direct_probe =  SPI1_WAKE_EN_direct;
+	SPI1_STAT_direct_probe =  SPI1_STAT_direct;
+}
+
+void read_SPI2_regs() // for debug only
+{
+	// note, these appear in the same order as in the user guide
+	SPI2_DATA0_direct_probe =  SPI2_DATA0_direct;
+	SPI2_CTRL0_direct_probe =  SPI2_CTRL0_direct;
+	SPI2_CTRL1_direct_probe =  SPI2_CTRL1_direct;
+	SPI2_CTRL2_direct_probe =  SPI2_CTRL2_direct;
+	SPI2_SS_TIME_direct_probe =  SPI2_SS_TIME_direct;
+	SPI2_CLK_CFG_direct_probe =  SPI2_CLK_CFG_direct;
+	SPI2_DMA_direct_probe =  SPI2_DMA_direct;
+	SPI2_INT_FL_direct_probe =  SPI2_INT_FL_direct;
+	SPI2_INT_EN_direct_probe =  SPI2_INT_EN_direct;
+	SPI2_WAKE_FL_direct_probe =  SPI2_WAKE_FL_direct;
+	SPI2_WAKE_EN_direct_probe =  SPI2_WAKE_EN_direct;
+	SPI2_STAT_direct_probe =  SPI2_STAT_direct;
+
+}
+
+
+void read_DMA0_regs() // for debug only
+{
+	// note, these appear in the same order as in the user guide
+
+	DMA0_CTRL_direct_probe = DMA0_CTRL_direct;
+	DMA0_INTR_direct_probe  = DMA0_INTR_direct;
+	DMA0_CH0_CFG_direct_probe = DMA0_CH0_CFG_direct;
+	DMA0_CH0_ST_direct_probe = DMA0_CH0_ST_direct;
+	DMA0_CH0_SRC_direct_probe = DMA0_CH0_SRC_direct;
+	DMA0_CH0_DST_direct_probe = DMA0_CH0_DST_direct;
+	DMA0_CH0_CNT_direct_probe = DMA0_CH0_CNT_direct;
+	DMA0_CH0_SRC_RLD_direct_probe = DMA0_CH0_SRC_RLD_direct;
+	DMA0_CH0_DST_RLD_direct_probe = DMA0_CH0_DST_RLD_direct;
+	DMA0_CH0_CNT_RLD_direct_probe = DMA0_CH0_CNT_RLD_direct;
+}
+
+
+
+
+void reset_adc()
+{
+	mxc_gpio_cfg_t gpio_out21;
+	gpio_out21.port =MXC_GPIO_PORT_OUT0;
+	gpio_out21.mask= MXC_GPIO_PIN_OUT21;
+	gpio_out21.pad = MXC_GPIO_PAD_NONE;
+	gpio_out21.func = MXC_GPIO_FUNC_OUT;
+	gpio_out21.vssel = MXC_GPIO_VSSEL_VDDIO;
+	MXC_GPIO_Config(&gpio_out21);
+	MXC_GPIO_OutClr(gpio_out21.port,gpio_out21.mask); // start with ADC disabled
+	MXC_Delay(100000);
+	MXC_GPIO_OutSet(gpio_out21.port,gpio_out21.mask); // enable ADC
+}
+
+
+
+
+
+
+// set the ADC into host clock mode; this outputs a 20MHz sclk on the busy pin
+// that can be used to drive SPI 1 in slave mode
+// so we don't need to do this ourselves externally
+// must connect the busy pin to spi 1 sclk (requires board hack)
+void set_adc_host_clock_mode()
+{
+	int ret;
+	uint16_t reg_addr = 0;
+	// over-rides the GPIO control of SS, so do all the ADC register init writes first
+
+	uint8_t SPI2_tx_3byte[3];
+	uint8_t SPI2_rx_3byte[3];
+
+	// configure gpio bit-bang AFTER spi2 init
+	gpio_out16.port = MXC_GPIO_PORT_OUT0;
+	gpio_out16.mask = MXC_GPIO_PIN_OUT16;
+	gpio_out16.pad = MXC_GPIO_PAD_NONE;
+	gpio_out16.func = MXC_GPIO_FUNC_OUT;
+	gpio_out16.vssel = MXC_GPIO_VSSEL_VDDIO;
+	gpio_out16.drvstr = MXC_GPIO_DRVSTR_3;
+	ret = MXC_GPIO_Config(&gpio_out16);
+	MXC_GPIO_OutSet(gpio_out16.port, gpio_out16.mask); // SS high
+
+	ret = MXC_SPI_Init(MXC_SPI2, 1, 0, 1, 0, 5000000, MAP_A);
+	if (ret != E_NO_ERROR) {
+		   debug1 = 2;
+		}
+
+	//Setting the data size
+	ret = MXC_SPI_SetDataSize(MXC_SPI2, 8);// 8 bits/char
+	if (ret != E_NO_ERROR) {
+		   debug1 = 2;
+		}
+	//Setting width of the SPI in this case 4 wire for spi2 master
+	ret = MXC_SPI_SetWidth(MXC_SPI2, SPI_WIDTH_STANDARD);
+	if (ret != E_NO_ERROR) {
+		   debug1 = 2;
+		}
+	//Setting the SPI mode
+	ret = MXC_SPI_SetMode(MXC_SPI2, SPI_MODE_0);
+	if (ret != E_NO_ERROR) {
+		   debug1 = 2;
+		}
+
+	// Master 2 register write parameters
+	SPI2_req_master_ctrl_write.spi = MXC_SPI2;
+	SPI2_req_master_ctrl_write.txData = (uint8_t *)SPI2_tx_3byte;
+	SPI2_req_master_ctrl_write.rxData = (uint8_t *)SPI2_rx_3byte;
+	SPI2_req_master_ctrl_write.txLen = 3;
+	SPI2_req_master_ctrl_write.rxLen = 1;
+	SPI2_req_master_ctrl_write.ssIdx = MXC_SPI2_SSIDX;
+	SPI2_req_master_ctrl_write.ssDeassert = 1;
+	SPI2_req_master_ctrl_write.txCnt = 0;
+	SPI2_req_master_ctrl_write.rxCnt = 0;
+	SPI2_req_master_ctrl_write.completeCB = NULL;
+
+// put in host clk mode
+	// Separating first byte of 16 bit address and making sure the first bit is 1 for read operation
+	reg_addr = 0x3fff;
+	SPI2_tx_3byte[0] = AD463X_REG_READ |((reg_addr >> 8) & 0x7F); // Separating first byte of 16 bit address
+	SPI2_tx_3byte[1] = (uint8_t)reg_addr;  //Separating second byte of address
+	SPI2_tx_3byte[2] = AD463X_REG_READ_DUMMY;
+	//	**** Perform Transaction ****
+	MXC_GPIO_OutClr(gpio_out16.port, gpio_out16.mask);
+	ret = MXC_SPI_MasterTransaction(&SPI2_req_master_ctrl_write);
+	if (ret != E_NO_ERROR) {
+		   debug1 = 2;
+		}
+	MXC_GPIO_OutSet(gpio_out16.port, gpio_out16.mask);
+	MXC_Delay(4);
+// ** now write clock divider for host clock mode
+	reg_addr = AD463X_REG_OSCILATOR; // 0x21
+	SPI2_tx_3byte[0] = ((reg_addr >> 8) & 0x7F); // Separating first byte of 16 bit address
+	SPI2_tx_3byte[1] = (uint8_t)reg_addr;  //Separating second byte of address
+	SPI2_tx_3byte[2] = 0x02;
+	//	**** Perform Transaction ****
+	MXC_GPIO_OutClr(gpio_out16.port, gpio_out16.mask);
+	MXC_Delay(4);
+	MXC_SPI_MasterTransaction(&SPI2_req_master_ctrl_write);
+	MXC_GPIO_OutSet(gpio_out16.port, gpio_out16.mask);
+	MXC_Delay(4);
+	// ** now write host clock mode
+	// ** note, once this is set, an sclk burst will appear on BUSY, but only when Slave Sel falls
+	reg_addr = AD463X_REG_MODES; // 0x20
+	SPI2_tx_3byte[0] = ((reg_addr >> 8) & 0x7F); // Separating first byte of 16 bit address
+	SPI2_tx_3byte[1] = (uint8_t)reg_addr;  //Separating second byte of address
+	SPI2_tx_3byte[2] = 0x20;
+	//SPI2_tx_3byte[2] = 0x00;
+	//	**** Perform Transaction ****
+	MXC_GPIO_OutClr(gpio_out16.port, gpio_out16.mask);
+	MXC_Delay(4);
+	MXC_SPI_MasterTransaction(&SPI2_req_master_ctrl_write);
+	MXC_GPIO_OutSet(gpio_out16.port, gpio_out16.mask);
+	MXC_Delay(4);
+
+
+	// now exit host mode
+	reg_addr = AD463X_REG_EXIT_CFG_MODE; // 0x14
+	SPI2_tx_3byte[0] = ((reg_addr >> 8) & 0x7F); // Separating first byte of 16 bit address
+	SPI2_tx_3byte[1] = (uint8_t)reg_addr;  //Separating second byte of address
+	SPI2_tx_3byte[2] = AD463X_EXIT_CFG_MODE; // 0x01
+	//	**** Perform Transaction ****
+	MXC_GPIO_OutClr(gpio_out16.port, gpio_out16.mask);
+	MXC_Delay(4);
+
+	MXC_SPI_MasterTransaction(&SPI2_req_master_ctrl_write);
+	MXC_Delay(4);
+	MXC_GPIO_OutSet(gpio_out16.port, gpio_out16.mask);
+	MXC_Delay(100);
+	// now shutdown SPI2 and the bit-bang GPIO SS control
+	MXC_SPI_Shutdown(MXC_SPI2);
+	// make gpio tri-state so ADC SS cab be driven by ext FS soure
+	gpio_out16.func = MXC_GPIO_FUNC_IN;
+	MXC_GPIO_Config(&gpio_out16);
+	MXC_GPIO_Shutdown(gpio_out16.mask); // let the ADC clock series resistor drive the SPI1_Slave SS pin
+
+}
+
+
+
+
+// spi 1 receives the stream adc input and is connected to the dma, so it must be a slave.
+// warning, board hacks are required to make spi1 work as a slave.
+// its complicated because spi2 is set up to write to the adc control registers
+// using gpio bit-bang for the slave select, but in adc-streaming mode, the
+// slave select must be driven externally. So we connect the adc convert signal
+// (a square wave at fs) to the slave-select pin using a resistor, When the spi2 control
+// writes are done, the gpio is tri-stated and the pin then is driven through the resistor.
+// This works but is pretty hacky, and a better solution should be found using
+// a modified timing generator using external logic, with a tri-state output that
+// can be enabled sing a gpio, so the slave select pin can either drive the output or be driven
+// from the timing generator
+
+void spi1_init_slave()
+{
+	// over-rides the GPIO control of SS, so do all the ADC register init writes first
+	SPI1_req.spi = MXC_SPI1;
+	SPI1_req.txData = NULL;
+	SPI1_req.rxData = (uint8_t *)SPI1_rx_3byte;
+	SPI1_req.txLen = 0;
+	SPI1_req.rxLen = 3; // chars
+	SPI1_req.ssIdx = 0;
+	SPI1_req.ssDeassert = 1;
+	SPI1_req.txCnt = 0;
+	SPI1_req.rxCnt = 0;
+	SPI1_req.completeCB = NULL;
+
+	MXC_SPI_Init(MXC_SPI1, 0, 0, 0, 0, 0, MAP_A);
+	//Setting the data size
+	MXC_SPI_SetDataSize(MXC_SPI1, 8);// bits/char, each spi trans takes in 3 chars = 24 bits
+	//Setting width of the SPI in this case 3- wire SPI for SPI1 master
+	MXC_SPI_SetWidth(MXC_SPI1, SPI_WIDTH_3WIRE);
+	//Setting the SPI mode
+	MXC_SPI_SetMode(MXC_SPI1, SPI_MODE_1);
+
+	MXC_SPI_SlaveTransactionAsync(&SPI1_req); // complete the init; don't use the data!
+
+	MXC_SPI_SetRXThreshold(MXC_SPI1, 23); // threshold of 24 bytes ( 8 samples of 3 bytes each) to trigger dma
+	SPI1_CTRL0_direct &= 0xfffffffe; // disable the port
+	MXC_SPI_ClearRXFIFO(MXC_SPI1); // clear the fifo, start only on pos edge of Slave-sel-B
+
+
+
+}
+
+
+
+//I2C callback function
+void I2C_Callback(mxc_i2c_req_t *req, int error)
+{
+    I2C_FLAG = error;
+}
+
+
+void DMA_CALLBACK_func(int a, int b)
+// this gets called by the DMA 1st, and when this returns, it goes directly to the DMA0_IRQHandler()
+{
+
+}
+
+
+
+void init_dma_MXC()
+{
+	MXC_DMA_Init(MXC_DMA0);
+	mychannel = MXC_DMA_AcquireChannel(MXC_DMA0);
+
+	mxc_dma_srcdst_t dma_transfer;
+	dma_transfer.ch = mychannel;
+	dma_transfer.source = NULL;
+	dma_transfer.dest = &dmaDestBuff[0];
+	dma_transfer.len = DMA_buffLen_bytes; // 3 X 8K bytes
+
+	mxc_dma_config_t dma_config;
+	dma_config.ch = mychannel;
+	dma_config.reqsel = MXC_DMA_REQUEST_SPI1RX;
+	dma_config.srcwd = MXC_DMA_WIDTH_BYTE;
+	dma_config.dstwd = MXC_DMA_WIDTH_BYTE;
+	dma_config.srcinc_en = 0; // this is ignored??
+	dma_config.dstinc_en = 1;
+
+	mxc_dma_adv_config_t advConfig;
+	advConfig.ch = mychannel;
+	advConfig.prio = MXC_DMA_PRIO_HIGH;
+	advConfig.reqwait_en = 0;
+	advConfig.tosel = MXC_DMA_TIMEOUT_4_CLK;
+	advConfig.pssel = MXC_DMA_PRESCALE_DISABLE;
+	advConfig.burst_size = 24;
+
+
+	MXC_DMA_ConfigChannel(dma_config, dma_transfer);
+	MXC_DMA_AdvConfigChannel(advConfig);
+	MXC_DMA_SetSrcDst(dma_transfer); // is this redundant??
+	MXC_DMA_SetSrcReload(dma_transfer);// is this redundant??
+	MXC_DMA_SetChannelInterruptEn(mychannel, false, true); // ctz
+	MXC_DMA_SetCallback(mychannel, DMA_CALLBACK_func);
+	MXC_DMA_EnableInt(mychannel);
+
+}
+
+
+
+
+
+
+
+void write_wav_header(FIL *file) { // from chapGPT
+	// 44 byte header with zero-fill
+    uint8_t header[WAV_BLOCK_SIZE];
+    //zero-fill oit to 512 bytes so that all block SD card writes align to sector size
+    // note, the zero-filling occurs after the 44-byte wav header, 512 -44 = 468,
+    //which is a multiple of both 3 (for 24-bit) and 2 (for 16-bit); required to not mess up
+    // the byte alignment when the real data starts
+
+    // Initialize header with default values
+    memset(header, 0, WAV_BLOCK_SIZE);
+    // RIFF header
+    memcpy(header, "RIFF", 4); // Chunk ID
+    // Chunk Size (placeholder, to be updated later)
+    // Format
+    memcpy(header + 8, "WAVE", 4);
+
+    // fmt subchunk
+    memcpy(header + 12, "fmt ", 4); // Subchunk1 ID
+    *(uint32_t *)(header + 16) = 16; // Subchunk1 Size (16 for PCM)
+    *(WORD *)(header + 20) = 1; // Audio Format (1 for PCM)
+    *(WORD *)(header + 22) = 1; // Num Channels (1 for mono)
+#ifdef FS48K_16BIT
+    *(uint32_t *)(header + 24) = 48000; // Sample Rate (44.1 kHz)
+    *(uint32_t *)(header + 28) = 48000 * 1 * 2; // Byte Rate (Sample Rate * Num Channels * BitsPerSample/8)
+    *(WORD *)(header + 32) = 1 * 2; // Block Align (Num Channels * BitsPerSample/8)
+    *(WORD *)(header + 34) = 16; // Bits Per Sample (16 bits)
+#endif
+#ifdef FS384K_24BIT
+    *(uint32_t *)(header + 24) = 384000; // Sample Rate (44.1 kHz)
+      *(uint32_t *)(header + 28) = 384000 * 1 * 3; // Byte Rate (Sample Rate * Num Channels * BitsPerSample/8)
+      *(WORD *)(header + 32) = 1 * 3; // Block Align (Num Channels * BitsPerSample/8)
+      *(WORD *)(header + 34) = 24; // Bits Per Sample (16 bits)
+#endif
+
+
+    // data subchunk
+    memcpy(header + 36, "data", 4); // Subchunk2 ID
+    // Subchunk2 Size, 4 bytes (40-43) (placeholder, to be updated later)
+
+
+    // note the rest of the 512 bytes are already set to 0, so just write the whole block at once
+
+    // Write header to file
+    uint bw;
+    f_write(file, header, WAV_BLOCK_SIZE, &bw);
+    debug2 = (uint32_t)bw;
+    debug1 = 10;
+}
+
+
+// after wav file is closed, go back and find the size, and fill in the missing data in the header
+void update_wav_header(FIL *file) { // from CHATgpt
+    uint32_t fileSize = f_size(file);
+    uint32_t chunkSize = fileSize - 8;
+    uint32_t subchunk2Size = fileSize - WAV_HEADER_SIZE;
+
+    // Seek to Chunk Size position and update
+    f_lseek(file, 4);
+    UINT bw;
+    f_write(file, &chunkSize, 4, &bw);
+
+    // Seek to Subchunk2 Size position and update
+    f_lseek(file, 40);
+    f_write(file, &subchunk2Size, 4, &bw);
+}
+
+
+
+
+
+
+
+// ************************* This is where all the work gets done.
+// *** 8k input sample buffer appears here and persists for 20ms ***
+void DMA0_IRQHandler()
+{
+
+
+
+#ifdef FS48K_16BIT
+	uint32_t k,i,j;
+	uint8_t dmaByte2,dmaByte1,dmaByte0;
+	q31_t temp0_q31=0,temp1_q31=0,temp2_q31=0,temp3_q31=0;
+	uint bw;
+    int flags;
+    MXC_DMA_Handler(MXC_DMA0);
+    flags = MXC_DMA_ChannelGetFlags(mychannel); // clears the cfg enable bit
+    MXC_DMA_ChannelClearFlags(mychannel, flags);
+
+
+
+	k = DMA_buffLen; // loop counter
+	i = 0; // byte pointer
+	j=0; // word pointer
+	//MXC_GPIO_OutSet(gpio_out12.port,gpio_out12.mask); // timing test
+
+	// DMA byte-to-signed 32 bit word assembly process
+	// Note that if the DMA streaming is turned off to run other processes, you
+	// will need to use the "stall" mechanism to turn it back on (see main()) in order to insure
+	// that you don't start off with partially-written words (1 or 2 bytes) in the SPI fifo
+	while(k > 0) {
+		// it's good to read the memory from the bottom up, because the low memory
+		// will be the first to be over-written with new samples
+		dmaByte2 = dmaDestBuff[i++]; //ms byte
+		dmaByte1 = dmaDestBuff[i++]; //mid byte
+		dmaByte0 = dmaDestBuff[i++]; //ls byte
+		//dmaDestBuff_16bit[j++] = (q15_t)((dmaByte2 << 8) | dmaByte1);
+		dmaDestBuff_32bit[j++]  = (q31_t)((dmaByte2 << 24) | (dmaByte1 << 16) | (dmaByte0 << 8)); // use for 24-bit case
+
+		k--;
+
+	}
+
+	// do th fast fir filtering; must be compiled with 02 effort
+	//I use a multi-rate filter for fastest speed,2:1 for each stage, 3 stages
+	// note, for 384K only recording, you can skip the next 3 lines (no filtering).
+
+////	MXC_GPIO_OutSet(gpio_out12.port,gpio_out12.mask); // timing test
+//	arm_fir_decimate_fast_q31_bob(&Sdeci_2x_0,dmaDestBuff_32bit,dma_rx_deci_2x,DMA_buffLen);
+//	arm_fir_decimate_fast_q31_bob(&Sdeci_2x_1,dma_rx_deci_2x,dma_rx_deci_4x,buffLen_deci2x);
+//	arm_fir_decimate_fast_q31_bob(&Sdeci_2x_2,dma_rx_deci_4x,dma_rx_deci_8x,buffLen_deci4x);
+//
+
+
+	arm_fir_decimate_fast_q31_bob(&Sdeci_48k_0,dmaDestBuff_32bit,dma_rx_deci_2x,DMA_buffLen);
+	arm_fir_decimate_fast_q31_bob(&Sdeci_48k_1,dma_rx_deci_2x,dma_rx_deci_4x,buffLen_deci2x);
+	arm_fir_decimate_fast_q31_bob(&Sdeci_48k_2,dma_rx_deci_4x,dma_rx_deci_8x,buffLen_deci4x);
+	arm_q31_to_q15(dma_rx_deci_8x,dma_rx_deci_16bits_8x,buffLen_deci8x); // convert from signed 32-bit to signed 16-bit
+
+
+//
+//	switch(magpie_FS) {
+//
+//		case fs_16k:
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_16k_0,dmaDestBuff_32bit,dma_rx_deci_2x,DMA_buffLen);
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_16k_1,dma_rx_deci_2x,dma_rx_deci_4x,buffLen_deci2x);
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_16k_2,dma_rx_deci_4x,dma_rx_deci_8x,buffLen_deci4x);
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_16k_3,dma_rx_deci_8x,dma_rx_deci_24x,buffLen_deci8x);
+//			arm_q31_to_q15(dma_rx_deci_24x,dma_rx_deci_16bits_4k,buffLen_deci24x); // convert from signed 32-bit to signed 16-bit
+//			numWordsSDwrite = buffLen_deci24x;
+//			break;
+//		case fs_24k:
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_24k_0,dmaDestBuff_32bit,dma_rx_deci_2x,DMA_buffLen);
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_24k_1,dma_rx_deci_2x,dma_rx_deci_4x,buffLen_deci2x);
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_24k_2,dma_rx_deci_4x,dma_rx_deci_8x,buffLen_deci4x);
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_24k_3,dma_rx_deci_8x,dma_rx_deci_16x,buffLen_deci8x);
+//			// debug
+////			arm_q31_to_q15(dma_rx_deci_8x,dma_rx_deci_16bits_4k,buffLen_deci8x); // convert from signed 32-bit to signed 16-bit
+////			numWordsSDwrite = buffLen_deci8x;
+//			arm_q31_to_q15(dma_rx_deci_16x,dma_rx_deci_16bits_4k,buffLen_deci16x); // convert from signed 32-bit to signed 16-bit
+//			numWordsSDwrite = buffLen_deci16x;
+//			break;
+//		case fs_32k:
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_32k_0,dmaDestBuff_32bit,dma_rx_deci_2x,DMA_buffLen);
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_32k_1,dma_rx_deci_2x,dma_rx_deci_4x,buffLen_deci2x);
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_32k_2,dma_rx_deci_4x,dma_rx_deci_12x,buffLen_deci4x);
+//			arm_q31_to_q15(dma_rx_deci_12x,dma_rx_deci_16bits_4k,buffLen_deci12x); // convert from signed 32-bit to signed 16-bit
+//			numWordsSDwrite = buffLen_deci12x;
+//
+//			break;
+//		case fs_48k:
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_48k_0,dmaDestBuff_32bit,dma_rx_deci_2x,DMA_buffLen);
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_48k_1,dma_rx_deci_2x,dma_rx_deci_4x,buffLen_deci2x);
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_48k_2,dma_rx_deci_4x,dma_rx_deci_8x,buffLen_deci4x);
+//			arm_q31_to_q15(dma_rx_deci_8x,dma_rx_deci_16bits_4k,buffLen_deci8x); // convert from signed 32-bit to signed 16-bit
+//			numWordsSDwrite = buffLen_deci8x;
+//			break;
+//		case fs_96k:
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_96k_0,dmaDestBuff_32bit,dma_rx_deci_2x,DMA_buffLen);
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_96k_1,dma_rx_deci_2x,dma_rx_deci_4x,buffLen_deci2x);
+//			arm_q31_to_q15(dma_rx_deci_4x,dma_rx_deci_16bits_4k,buffLen_deci4x); // convert from signed 32-bit to signed 16-bit
+//			numWordsSDwrite = buffLen_deci4x;
+//			break;
+//		case fs_192k:
+//			arm_fir_decimate_fast_q31_bob(&Sdeci_192k_0,dmaDestBuff_32bit,dma_rx_deci_2x,DMA_buffLen);
+//			arm_q31_to_q15(dma_rx_deci_2x,dma_rx_deci_16bits_4k,buffLen_deci2x); // convert from signed 32-bit to signed 16-bit
+//			numWordsSDwrite = buffLen_deci2x;
+//			break;
+//		default:
+//
+//			break;
+//	}
+
+
+
+			//	MXC_GPIO_OutClr(gpio_out12.port,gpio_out12.mask); // timing test
+
+	// timing test results; the 3 filters above take about 9ms, and the dma byte-to-signed-data conversion
+	// takes about 2ms. since we have 21.3 ms per DMA frame, we have about 10ms left.
+	// this should be plenty of time to blast out data to the the SD cards (I hope!)
+	// Note, this result is obtained with -o2 or -o3 compiler effort.
+	// With -o1 effort, the times above are worse by almost 2x (leaving very little time for anything else)
+	// With standard compiler effort, the dma processing does not finish at all!
+
+	// *****************This is where you write to the SD card********
+	// *** If you want to write 48KHz data, you have 1K words available in buffer dma_rx_deci_8x
+	// ** If you want to write 384KHz data, you have 8K words in buffer dmaDestBuff_32bit
+	// note in the following line, the dest buff is sized to handle the largest block it will ever see (fs=192k, 2:1 decimation)
+	// but the number of words to copy is limited by the 3rd argument
+//	arm_q31_to_q15(dma_rx_deci_24x,dma_rx_deci_16bits_4k,buffLen_deci24x); // convert from signed 32-bit to signed 16-bit
+
+	//arm_q31_to_q15(dma_rx_deci_8x,dma_rx_deci_16bits_8x,buffLen_deci8x); // convert from signed 32-bit to signed 16-bit
+
+	dataBlocksDmaCount = 1;
+    count_dma_irq++;
+
+    // get ready for next dma transfer
+    DMA0_CH0_CFG_direct |= 0x3; // enable dma and reload bits
+    DMA0_CH0_CNT_RLD_direct |= 0x80000000; // redundant, do I have to do it again here?
+#endif
+
+
+#ifdef FS384K_24BIT
+
+   // notem the data is sadly in big-endian format (location 0 is an msb)
+    // but the wave file is little-endian, so we need to swap the
+    // MSByte and the LSbyte (the middle byte can stay the same)
+    uint32_t k,i,j;
+	int flags;
+	MXC_DMA_Handler(MXC_DMA0);
+	flags = MXC_DMA_ChannelGetFlags(mychannel); // clears the cfg enable bit
+	MXC_DMA_ChannelClearFlags(mychannel, flags);
+
+
+
+
+// switch endian-ness while copying
+	k = DMA_buffLen; // loop counter, in units of 24-bit samples
+	i = 0; // byte pointer
+	j=0; // word pointer
+//	while(k > 0) {
+//		// it's good to read the memory from the bottom up, because the low memory
+//		// will be the first to be over-written with new samples
+//		dmaDestBuffCopy[i+2] = dmaDestBuff[i]; //ms byte
+//		dmaDestBuffCopy[i+1] = dmaDestBuff[i+1]; //mid byte
+//		dmaDestBuffCopy[i] = dmaDestBuff[i+2]; //ls byte
+//		i+=3;
+//		k--;
+//
+//	}
+
+
+	while(k > 0) {
+		// it's good to read the memory from the bottom up, because the low memory
+		// will be the first to be over-written with new samples
+		bigDMAbuff[i+2 + offsetDMA] = dmaDestBuff[i]; //ms byte
+		bigDMAbuff[i+1 + offsetDMA] = dmaDestBuff[i+1]; //mid byte
+		bigDMAbuff[i + offsetDMA] = dmaDestBuff[i+2]; //ls byte
+		i+=3;
+		k--;
+
+	}
+
+	blockPtrModuloDMA = (blockPtrModuloDMA+1) & 0x0000000f; // wraps at 15
+	offsetDMA = blockPtrModuloDMA*DMA_buffLen_bytes;
+
+	dataBlocksDmaCount+= 1;
+	//dataBlockWriteComplete = 0;
+	count_dma_irq++;
+
+
+	// get ready for next dma transfer
+	DMA0_CH0_CFG_direct |= 0x3; // enable dma and reload bits
+	DMA0_CH0_CNT_RLD_direct |= 0x80000000; // redundant, do I have to do it again here?
+
+#endif
+
+
+
+}
+
+
+
+int main(void)
+
+{
+
+	MXC_Delay(MXC_DELAY_SEC(1));
+	mxc_sdhc_cfg_t cfg;
+	FF_ERRORS[0] = "FR_OK";
+	FF_ERRORS[1] = "FR_DISK_ERR";
+	FF_ERRORS[2] = "FR_INT_ERR";
+	FF_ERRORS[3] = "FR_NOT_READY";
+	FF_ERRORS[4] = "FR_NO_FILE";
+	FF_ERRORS[5] = "FR_NO_PATH";
+	FF_ERRORS[6] = "FR_INVLAID_NAME";
+	FF_ERRORS[7] = "FR_DENIED";
+	FF_ERRORS[8] = "FR_EXIST";
+	FF_ERRORS[9] = "FR_INVALID_OBJECT";
+	FF_ERRORS[10] = "FR_WRITE_PROTECTED";
+	FF_ERRORS[11] = "FR_INVALID_DRIVE";
+	FF_ERRORS[12] = "FR_NOT_ENABLED";
+	FF_ERRORS[13] = "FR_NO_FILESYSTEM";
+	FF_ERRORS[14] = "FR_MKFS_ABORTED";
+	FF_ERRORS[15] = "FR_TIMEOUT";
+	FF_ERRORS[16] = "FR_LOCKED";
+	FF_ERRORS[17] = "FR_NOT_ENOUGH_CORE";
+	FF_ERRORS[18] = "FR_TOO_MANY_OPEN_FILES";
+	FF_ERRORS[19] = "FR_INVALID_PARAMETER";
+	srand(12347439);
+	int run = 1, input = -1;
+
+	int ret=0;
+
+	static uint8_t stall;
+	static uint32_t ktrace = 0;
+
+
+	// init the 3 fir 2x decimation filters
+
+//	arm_fir_decimate_init_q31(&Sdeci_2x_0,decimate_2x_fir_numcoeffs0,2,&firCoeffs_stage0[0],&firState_stage0[0],DMA_buffLen);
+//	arm_fir_decimate_init_q31(&Sdeci_2x_1,decimate_2x_fir_numcoeffs1,2,&firCoeffs_stage1[0],&firState_stage1[0],buffLen_deci2x);
+//	arm_fir_decimate_init_q31(&Sdeci_2x_2,decimate_2x_fir_numcoeffs2,2,&firCoeffs_stage2[0],&firState_stage2[0],buffLen_deci4x);
+//
+
+// iit all decimation filters in case you want to change fs without reset
+//
+//	arm_fir_decimate_init_q31(&Sdeci_16k_0,deci_16k_numcoeffs_0,2, &firCoeffs_16k_0[0],&firState_16k_0[0],DMA_buffLen);
+//	arm_fir_decimate_init_q31(&Sdeci_16k_1,deci_16k_numcoeffs_1,2, &firCoeffs_16k_1[0],&firState_16k_1[0],buffLen_deci2x);
+//	arm_fir_decimate_init_q31(&Sdeci_16k_2,deci_16k_numcoeffs_2,2, &firCoeffs_16k_2[0],&firState_16k_2[0],buffLen_deci4x);
+//	arm_fir_decimate_init_q31(&Sdeci_16k_3,deci_16k_numcoeffs_3,3, &firCoeffs_16k_3[0],&firState_16k_3[0],buffLen_deci8x);
+//
+//	arm_fir_decimate_init_q31(&Sdeci_24k_0,deci_24k_numcoeffs_0,2, &firCoeffs_24k_0[0],&firState_24k_0[0],DMA_buffLen);
+//	arm_fir_decimate_init_q31(&Sdeci_24k_1,deci_24k_numcoeffs_1,2, &firCoeffs_24k_1[0],&firState_24k_1[0],buffLen_deci2x);
+//	arm_fir_decimate_init_q31(&Sdeci_24k_2,deci_24k_numcoeffs_2,2, &firCoeffs_24k_2[0],&firState_24k_2[0],buffLen_deci4x);
+//	arm_fir_decimate_init_q31(&Sdeci_24k_3,deci_24k_numcoeffs_3,2, &firCoeffs_24k_3[0],&firState_24k_3[0],buffLen_deci8x);
+//
+//	arm_fir_decimate_init_q31(&Sdeci_32k_0,deci_32k_numcoeffs_0,2, &firCoeffs_32k_0[0],&firState_32k_0[0],DMA_buffLen);
+//	arm_fir_decimate_init_q31(&Sdeci_32k_1,deci_32k_numcoeffs_1,2, &firCoeffs_32k_1[0],&firState_32k_1[0],buffLen_deci2x);
+//	arm_fir_decimate_init_q31(&Sdeci_32k_2,deci_32k_numcoeffs_2,3, &firCoeffs_32k_2[0],&firState_32k_2[0],buffLen_deci4x);
+
+	arm_fir_decimate_init_q31(&Sdeci_48k_0,deci_48k_numcoeffs_0,2, &firCoeffs_48k_0[0],&firState_48k_0[0],DMA_buffLen);
+	arm_fir_decimate_init_q31(&Sdeci_48k_1,deci_48k_numcoeffs_1,2, &firCoeffs_48k_1[0],&firState_48k_1[0],buffLen_deci2x);
+	arm_fir_decimate_init_q31(&Sdeci_48k_2,deci_48k_numcoeffs_2,2, &firCoeffs_48k_2[0],&firState_48k_2[0],buffLen_deci4x);
+
+//	arm_fir_decimate_init_q31(&Sdeci_96k_0,deci_96k_numcoeffs_0,2, &firCoeffs_96k_0[0],&firState_96k_0[0],DMA_buffLen);
+//	arm_fir_decimate_init_q31(&Sdeci_96k_1,deci_96k_numcoeffs_1,2, &firCoeffs_96k_1[0],&firState_96k_1[0],buffLen_deci2x);
+//
+//	arm_fir_decimate_init_q31(&Sdeci_192k_0,deci_192k_numcoeffs_0,2, &firCoeffs_192k_0[0],&firState_192k_0[0],DMA_buffLen);
+
+	//******************* set sample rate ************************
+	magpie_FS = fs_48k;
+	//*******************************************
+
+	//CARD writes, cluster size (== allocation size) may be 128Kb, whereas sector size is 512 bytes
+	cfg.bus_voltage = MXC_SDHC_Bus_Voltage_3_3;
+	cfg.block_gap = 0;
+	cfg.clk_div = 0x0b0; // Maximum divide ratio, frequency must be <= 400 kHz during Card Identification phase
+	// 7us clock period = 130khz, OK
+	if (MXC_SDHC_Init(&cfg) != E_NO_ERROR)
+	{
+		printf("Unable to initialize SDHC driver.\n");
+		return 1;
+	}
+
+
+	// wait for card to be inserted
+	while (!MXC_SDHC_Card_Inserted()) {}
+	printf("Card inserted.\n");
+
+
+	// set up card to get it ready for a transaction
+	if (MXC_SDHC_Lib_InitCard(10) == E_NO_ERROR) {
+		printf("Card Initialized.\n");
+		debug1 = 10;
+	} else {
+		printf("No card response! Remove card, reset EvKit, and try again.\n");
+		debug1 = 11;
+
+		return -1;
+	}
+
+	if (MXC_SDHC_Lib_Get_Card_Type() == CARD_SDHC) {
+		printf("Card type: SDHC\n");
+		debug1 = 12;
+	} else {
+		printf("Card type: MMC/eMMC\n");
+		debug1 = 13;
+	}
+
+	/* Configure for fastest possible clock, must not exceed 52 MHz for eMMC */
+
+
+	// for now, format the card every time, so we just make a single file per pass
+	MKFS_PARM format_options = { .fmt = FM_EXFAT };
+
+	if ((err = f_mkfs("", &format_options, work, sizeof(work))) != FR_OK) { //Format the default drive to FAT32
+		printf("Error formatting SD card: %s\n", FF_ERRORS[err]);
+		debug1 = 10;
+	} else {
+		printf("Drive formatted.\n");
+		debug1 = 10;
+	}
+
+	// mount the card
+	mount();
+	// create a file
+	if ((err = f_open(&file, "0:HELLO_BIRDS.wav", FA_CREATE_ALWAYS | FA_WRITE)) != FR_OK)
+	{
+		printf("Error opening file: %s\n", FF_ERRORS[err]);
+		f_mount(NULL, "", 0);
+		return err;
+	}
+	//f_expand(&file,300000000,0); must enable f_expand in ffconf.h; but didn't help with stall
+	debug1=11;
+
+	//Writing  Audio header file
+	// MXC_SDHC_Set_Clock_Config(1); // optional, set sd clock rate to 24MHz
+
+	write_wav_header(&file);
+
+
+	// now write some random data to the file.
+
+//	for(k=0;k < testWriteLen;k++) {
+//		ADCdata[k] = (uint8_t)rand();
+//
+//	}
+
+
+	debug1= 16;
+
+	// blue led pin 5 on feather
+	gpio_in30.port =MXC_GPIO_PORT_OUT0;
+	gpio_in30.mask= MXC_GPIO_PIN_OUT30;
+	gpio_in30.pad = MXC_GPIO_PAD_NONE;
+	gpio_in30.func = MXC_GPIO_FUNC_OUT;
+	gpio_in30.vssel = MXC_GPIO_VSSEL_VDDIO;
+	MXC_GPIO_Config(&gpio_in30);
+	MXC_GPIO_OutClr(gpio_in30.port,gpio_in30.mask); // set LOW (Led on)
+
+
+
+
+	// gpio 5 is pin 6 on the feather header, connected to motherboard green LED
+	gpio_out5.port =MXC_GPIO_PORT_OUT0;
+	gpio_out5.mask= MXC_GPIO_PIN_OUT5;
+	gpio_out5.pad = MXC_GPIO_PAD_NONE;
+	gpio_out5.func = MXC_GPIO_FUNC_OUT;
+	gpio_out5.vssel = MXC_GPIO_VSSEL_VDDIO;
+	MXC_GPIO_Config(&gpio_out5);
+	MXC_GPIO_OutSet(gpio_out5.port,gpio_out5.mask); // LED off
+
+
+// adc fs clock enable. Note after the spi_init_slave, this will be over-written by the spi definition and will go high
+	gpio_out20.port =MXC_GPIO_PORT_OUT0;
+	gpio_out20.mask= MXC_GPIO_PIN_OUT20;
+	gpio_out20.pad = MXC_GPIO_PAD_NONE;
+	gpio_out20.func = MXC_GPIO_FUNC_OUT;
+	gpio_out20.vssel = MXC_GPIO_VSSEL_VDDIO;
+	MXC_GPIO_Config(&gpio_out20);
+	MXC_GPIO_OutClr(gpio_out20.port,gpio_out20.mask); // start with adc clock disabled
+
+
+
+	// gpio 3 is pin 5 on the feather header and blue LED on motherboard
+	// we will disconnect the blue LED and use this gpio as in input from spi1 slave select
+	// so we can syncronize starting the spi port with rising slave-sel-B
+	gpio_in3.port =MXC_GPIO_PORT_OUT0;
+	gpio_in3.mask= MXC_GPIO_PIN_OUT3;
+	gpio_in3.pad = MXC_GPIO_PAD_NONE;
+	gpio_in3.func = MXC_GPIO_FUNC_IN;
+	gpio_in3.vssel = MXC_GPIO_VSSEL_VDDIO;
+	MXC_GPIO_Config(&gpio_in3);
+
+	// gpio 12, pin4 on feather, used for code timing tests
+	gpio_out12.port = MXC_GPIO_PORT_OUT0;
+	gpio_out12.mask = MXC_GPIO_PIN_OUT12;
+	gpio_out12.pad = MXC_GPIO_PAD_NONE;
+	gpio_out12.func = MXC_GPIO_FUNC_OUT;
+	gpio_out12.vssel = MXC_GPIO_VSSEL_VDDIO;
+	gpio_out12.drvstr = MXC_GPIO_DRVSTR_2;
+	ret = MXC_GPIO_Config(&gpio_out12);
+
+
+
+
+	// ***  set up I2C, write address 0x98, read addr 0x99
+
+	i2cErr = MXC_I2C_Init(I2C_MASTER, 1, 0);
+	mxc_i2c_req_t reqMaster;
+	reqMaster.i2c = I2C_MASTER;
+	reqMaster.addr = I2C_SLAVE_ADDR;
+	reqMaster.tx_buf = i2c_txdata;
+	reqMaster.tx_len = I2C_BYTES;
+	reqMaster.rx_buf = i2c_rxdata;
+	reqMaster.rx_len = 0;
+	reqMaster.restart = 0;
+	reqMaster.callback = NULL;
+	reqMaster.callback = I2C_Callback;
+	I2C_FLAG = 1;
+	MXC_I2C_SetFrequency(I2C_MASTER, I2C_FREQ);
+	i2cErr = MXC_I2C_MasterTransaction(&reqMaster);
+	MXC_Delay(10000);
+
+	//reset_adc();
+	MXC_Delay(100000);
+
+//	// test reg read/write to adc
+//	uint8_t regData=0;
+//	ad4630_spi_reg_read_4_wire(0x3fff, regData); // enter configuration mode
+//	ad4630_spi_reg_write_4_wire(0x000a, 0xaa); // write to scratchpad
+//	ad4630_spi_reg_read_4_wire(0x000a, regData); // read scratchpad
+//	ad4630_spi_reg_write_4_wire(0x0014, 0x01); // exit configuration mode
+//
+//	debug1 = (uint32_t)regData;
+
+
+
+
+	MXC_Delay(100000);
+	set_adc_host_clock_mode();
+	MXC_Delay(100000);
+	MXC_GPIO_OutSet(gpio_out20.port,gpio_out20.mask); // turn on adc clock
+
+	spi1_init_slave();
+	// over-rides the GPIO control of SS, so do all the ADC register init writes first
+	// note this sets the adc clock enable gpio high accidentally, but its already ON
+	debug1 = 11;
+	// enable the DMA interupts
+	//__enable_irq();
+	NVIC_EnableIRQ(DMA0_IRQn);
+
+	init_dma_MXC();
+
+//	PWMTimer();
+//	read_TMR0_regs();
+	// note, the following could probably be done with MXC functions
+	SPI1_DMA_direct = 0b00000000010110000000000000000000; // 24 bytes, enable rx fifo
+	SPI1_DMA_direct |= 0x80000000;// receive dma enable
+
+
+	stall = 1;
+	while(stall) { // stall until a rising edge on slave-sel-B. This is to insure we have no partial writes (1 or 2 bytes) that mess up the dma
+		temp1  = MXC_GPIO_InGet(gpio_in3.port,gpio_in3.mask); // L
+		temp2 =  MXC_GPIO_InGet(gpio_in3.port,gpio_in3.mask); // H
+		stall = (!temp2 || temp1);
+	}
+	SPI1_CTRL0_direct |= 0x00000001; // start the port (fifo was previously cleared)
+	debug1 = 10;
+	MXC_DMA_Start(mychannel); // sets bits 0 and 1 of control reg and bit 31 of count reload reg
+	debug2 = 10;
+
+	// note, the DMA enable and reload bits need to be set every time
+	// in the IRQ handler routine, otherwise it only does a single block transfer
+
+
+
+
+
+	// note that any variables d in the ISR, and then used here in main, must be of type volatile, for various geeky reasons
+#ifdef FS48K_16BIT
+	uint bw;
+	while(count_dma_irq < RECORDING_TIME_DMABLOCKS) { // interupts happen here, count_dma_irq increments at fs/dmaBlockSize
+		if(dataBlocksDmaCount) {
+			// note that 16-bit data is stored little-endian, which is the same as the WAV RIFF format, so you can just write it
+			//f_write(&file, dma_rx_deci_16bits_4k, numWordsSDwrite, &bw); // # bytes = 2X word length of buffer, 16 bits
+			f_write(&file, dma_rx_deci_16bits_8x,buffLen_deci8x , &bw); // # bytes = 2X word length of buffer, 16 bits
+
+//			if(bw != 1024) {
+//				debug1 = 11;
+//				debug2 = debug1 ;
+//			}
+			dataBlocksDmaCount=0;
+		}
+
+	}
+
+#endif
+
+#ifdef FS384K_24BIT
+	uint bw;
+	while(count_dma_irq < RECORDING_TIME_DMABLOCKS) { // interupts happen here, count_dma_irq increments at fs/dmaBlockSize
+		while((dataBlocksDmaCount - dataBlocksConsumedCount) > 0) { // there is normally a difference of 1, unless the SD card has stalled and the block writes have fallen behind
+			delta = dataBlocksDmaCount - dataBlocksConsumedCount;
+
+			// the following 6 lines are debug only to trace what happens during a stall. We can stall up to 16 DMA slots with available memory
+			if(delta > 14) { // enter whatever stall threshold you want here; over 16 will cause errors
+				deltaTrace[ktrace] = delta; // history of errors
+				deltaTracei[ktrace] = count_dma_irq; // where the error are located
+				ktrace++; // place for breakpoint if you want
+//				if delta > deltaMax {
+//				deltaMax = delta;
+//				deltaMaxi = count_dma_irq;
+//				}
+			}
+			MXC_GPIO_OutSet(gpio_out12.port,gpio_out12.mask); // timing test
+			f_write(&file, bigDMAbuff + offset, DMA_buffLen_bytes, &bw); // # bytes = 3X word length of buffer, 24 bits
+			MXC_GPIO_OutClr(gpio_out12.port,gpio_out12.mask); // timing test
+
+			dataBlocksConsumedCount+=1;
+			blockPtrModulo = (blockPtrModulo+1) & 0x0000000f; // wraps at 15
+			offset = blockPtrModulo*DMA_buffLen_bytes;
+		}
+
+	}
+#endif
+
+	SPI1_CTRL0_direct &= 0xfffffffe; // stop the port
+	MXC_DMA_Stop(mychannel);
+
+
+
+	if ((err = f_close(&file)) != FR_OK)
+	{
+		debug1=13;
+		f_mount(NULL, "", 0);
+		return err;
+	}
+
+
+
+	// re-open to finish the job
+	f_open(&file, "0:HELLO_BIRDS.wav", FA_READ | FA_WRITE);
+	update_wav_header(&file); // go back and fill in the file size (2 different places)
+	// close again
+	f_close(&file);
+
+
+	// unmount SD Card
+
+	if ((err = f_mount(NULL, "", 0)) != FR_OK)
+	{
+		debug1 = 15;
+		return err;
+	}
+	else
+	{
+		mounted = 0;
+	}
+
+	debug1 = count_dma_irq; // place for breakpoint
+
+
+	return 0;
+
+} // end of main
+
+
+
