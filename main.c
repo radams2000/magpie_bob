@@ -46,11 +46,11 @@
 
 
 // if the following is defined,it fills the dma mem with an external file, and repeats forever to make a test signal
-//#define TEST_DECIMATE
+#define TEST_DECIMATE
 
 // RECORDING TIME IN DMA Blocks (each DMA block is 21.33 ms)
 
-#define RECORDING_TIME_DMABLOCKS 1000
+#define RECORDING_TIME_DMABLOCKS 10
 
 //#define floatingPoint
 
@@ -276,14 +276,15 @@ static q31_t dmaDestBuff_32bit[DMA_buffLen] = {0}; // same data but assembled ba
 #endif
 #ifdef TEST_DECIMATE
 // fill dmaDestBuff with values from Matlab-generated test file
+//#include "./decimate_test_sin_1k.txt" // yes
+#include "./decimate_test_sin_xx.txt" // yes
+
 //#include "./decimate_test_16k.txt" // yes
 //#include "./decimate_test_24k.txt" // yes
 //#include "./decimate_test_32k.txt" // yes
-#include "./decimate_test_48k.txt" // yes
-//#include "./decimate_test_sin_48k.txt" // yes
-
+//#include "./decimate_test_48k.txt" // yes
 //#include "./decimate_test_96k.txt" // yes
-//#include "./decimate_test_192k_30dB.txt"
+//#include "./decimate_test_192k.txt"
 #endif
 
 //volatile q31_t debugBuff[DMA_buffLen] = {0};
@@ -945,9 +946,9 @@ void decimate_8x_iirHB( // takes 1.4ms, new design (7/28/24) with 50dB
 	static q31_t deci_stg1_out0 = 0;
 	static q31_t deci_stg1_out1 = 0;
 
-	static q31_t coeff_d2_n0_A_stg2 = 0x0E4C2F83;
-	static q31_t coeff_d1_n1_A_stg2 = 0x78C7E282;
-	static q31_t coeff_d1_n1_B_stg2 = 0x39DE69AD;
+	static q31_t coeff_d2_n0_A_stg2 = 0x0D9C6C2D;
+	static q31_t coeff_d1_n1_A_stg2 = 0x77233802;
+	static q31_t coeff_d1_n1_B_stg2 = 0x385BACD3;
 	static q31_t mult_temp1;
 	static q31_t mult_temp2;
 	static q31_t allpass_A,allpass_B;
@@ -965,18 +966,19 @@ void decimate_8x_iirHB( // takes 1.4ms, new design (7/28/24) with 50dB
 	//pSrc+=1; // start looking st position 1 in the array (newer)
 	while(k > 0) { // each loop produces 2 outputs at 2X rate, so use DMALEN/8
 
-		in0=(*pSrc++ >> 2);
-		in1=(*pSrc++ >> 2);
-		in2=(*pSrc++ >> 2);
-		in3=(*pSrc++ >> 2);
-		in4=(*pSrc++ >> 2);
-		in5=(*pSrc++ >> 2);
-		in6=(*pSrc++ >> 2);
-		in7=(*pSrc++ >> 2);
+		// input is divided by 16, then gain by 2*2*2, then gain by (1 + 1/2), 1/2*3/2 = 3/4 = -2.49 dB
+		in0=(*pSrc++ >> 4);
+		in1=(*pSrc++ >> 4);
+		in2=(*pSrc++ >> 4);
+		in3=(*pSrc++ >> 4);
+		in4=(*pSrc++ >> 4);
+		in5=(*pSrc++ >> 4);
+		in6=(*pSrc++ >> 4);
+		in7=(*pSrc++ >> 4);
 
 
 		// 1st stage comes from 3rd order elliptc prototype, 1st-order in non-delayed branch
-		// ***** 1st 2:1 decimator ***
+		// ***** 1st 2:1 decimator, gain = 2 ***
 
 		// 1st shift the zm1 to zm0 based on the current zm1 value
 		state_stg0_zm1 = state_stg0_zm0;
@@ -1008,22 +1010,23 @@ void decimate_8x_iirHB( // takes 1.4ms, new design (7/28/24) with 50dB
 		// instance 1
 		// 1st order allpass stg 1, 2 instances to produce 2 outputs
 		// 1st one is non-delayed
+		// gain = 2
 		state_stg1_A_zm1 = state_stg1_A_zm0;
-		state_stg1_A_zm0 = (deci_stg0_out1 >> 1) - (state_stg1_A_zm1 >> 3);
+		state_stg1_A_zm0 = deci_stg0_out1 - (state_stg1_A_zm1 >> 3);
 		allpass_A = state_stg1_A_zm1 + (state_stg1_A_zm0 >> 3);
 			// 1st order allpass for the delayed branch
 		state_stg1_B_zm1 = state_stg1_B_zm0;
-		state_stg1_B_zm0 = (deci_stg0_out0 >> 1) - (state_stg1_B_zm1 >> 1) - (state_stg1_B_zm1 >> 4);
+		state_stg1_B_zm0 = deci_stg0_out0  - (state_stg1_B_zm1 >> 1) - (state_stg1_B_zm1 >> 4);
 		allpass_B =  state_stg1_B_zm1 + (state_stg1_B_zm0 >> 1) + (state_stg1_B_zm0 >> 4);
 		deci_stg1_out0 = allpass_B+allpass_A;
 
 		// instance 2
 		state_stg1_A_zm1 = state_stg1_A_zm0;
-		state_stg1_A_zm0 = (deci_stg0_out3 >> 1) - (state_stg1_A_zm1 >> 3);
+		state_stg1_A_zm0 = deci_stg0_out3 - (state_stg1_A_zm1 >> 3);
 		allpass_A = state_stg1_A_zm1 + (state_stg1_A_zm0 >> 3);
 			// 1st order allpass for the delayed branch
 		state_stg1_B_zm1 = state_stg1_B_zm0;
-		state_stg1_B_zm0 = (deci_stg0_out2 >> 1) -(state_stg1_B_zm1 >> 1) - (state_stg1_B_zm1 >> 4);
+		state_stg1_B_zm0 = deci_stg0_out2 -(state_stg1_B_zm1 >> 1) - (state_stg1_B_zm1 >> 4);
 		allpass_B = state_stg1_B_zm1 + (state_stg1_B_zm0 >> 1) + (state_stg1_B_zm0 >> 4);
 		deci_stg1_out1 = allpass_B+allpass_A;
 
@@ -1033,26 +1036,26 @@ void decimate_8x_iirHB( // takes 1.4ms, new design (7/28/24) with 50dB
 		//un-delayed branch and a 1st-order allpass in the delayed branch (7th order elliptic)
 
 		// ***** 3rd 2:1 decimator ***
-
+		// gain 2
 			// 2nd order allpass
 		state_stg2_A_zm2 = state_stg2_A_zm1; // non-delayed branch
 		state_stg2_A_zm1 = state_stg2_A_zm0;
-		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_A_zm1 * coeff_d1_n1_A_stg2) >> 32);
-		mult_temp2 = (q31_t)  ( ((q63_t) state_stg2_A_zm2 * coeff_d2_n0_A_stg2) >> 32);
-		state_stg2_A_zm0 = (deci_stg1_out1 >> 1) - mult_temp1 - mult_temp2;
-		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_A_zm0 * coeff_d2_n0_A_stg2) >> 32);
-		mult_temp2 = (q31_t)  ( ((q63_t) state_stg2_A_zm1 * coeff_d1_n1_A_stg2) >> 32);
+		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_A_zm1 * coeff_d1_n1_A_stg2) >> 31);
+		mult_temp2 = (q31_t)  ( ((q63_t) state_stg2_A_zm2 * coeff_d2_n0_A_stg2) >> 31);
+		state_stg2_A_zm0 = deci_stg1_out1 - mult_temp1 - mult_temp2;
+		mult_temp2 = (q31_t)  ( ((q63_t) state_stg2_A_zm0 * coeff_d2_n0_A_stg2) >> 31);
+		//mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_A_zm1 * coeff_d1_n1_A_stg2) >> 31);
 		allpass_A = mult_temp1 + mult_temp2 + state_stg2_A_zm2;
 
 			// 1st order allpass for the delayed branch
 		state_stg2_B_zm1 = state_stg2_B_zm0;
-		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_B_zm1 * coeff_d1_n1_B_stg2) >> 32);
-		state_stg2_B_zm0 = (deci_stg1_out0 >> 1) - mult_temp1;
-		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_B_zm0 * coeff_d1_n1_B_stg2) >> 32);
+		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_B_zm1 * coeff_d1_n1_B_stg2) >> 31);
+		state_stg2_B_zm0 = deci_stg1_out0 - mult_temp1;
+		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_B_zm0 * coeff_d1_n1_B_stg2) >> 31);
 		allpass_B = mult_temp1 + state_stg2_B_zm1;
 
 		deci_out = allpass_B+allpass_A; // this has a gain of 1/4 from the input
-		*pDst++ =  (deci_out << 1) + deci_out; // 20*log10((1/4)*(2 + 1)) = -2.49 dB
+		*pDst++ =  (deci_out >> 1) + deci_out; // 20*log10((1/4)*(2 + 1)) = -2.49 dB
 		//debugBuff[j1++] = allpass_B+allpass_A;
 
 
@@ -1063,6 +1066,198 @@ void decimate_8x_iirHB( // takes 1.4ms, new design (7/28/24) with 50dB
 
 	}
 }
+
+
+
+
+
+void decimate_4x_iirHB( // takes 1.6ms, new design (7/28/24) with 50dB
+	q31_t * pSrc,
+	q31_t * pDst,
+	uint32_t len) // note len is the final decimated output length, = input length/8
+{
+	uint32_t k;
+
+	// the non-delayed Allpass state-var paths are designated with _A_
+	// the delayed Allpass state-var paths are designated with _B_
+
+	static q31_t state_stg1_A_zm1=0;
+	static q31_t state_stg1_A_zm0=0;
+	static q31_t state_stg1_B_zm1=0;
+	static q31_t state_stg1_B_zm0=0;
+
+	static q31_t state_stg2_A_zm2=0;
+	static q31_t state_stg2_A_zm1=0;
+	static q31_t state_stg2_A_zm0=0;
+	static q31_t state_stg2_B_zm1=0;
+	static q31_t state_stg2_B_zm0=0;
+
+
+	static q31_t deci_stg1_out0 = 0;
+	static q31_t deci_stg1_out1 = 0;
+	static q31_t coeff_d2_n0_A_stg2 = 0x0D9C6C2D;
+	static q31_t coeff_d1_n1_A_stg2 = 0x77233802;
+	static q31_t coeff_d1_n1_B_stg2 = 0x385BACD3;
+
+	static q31_t mult_temp1;
+	static q31_t mult_temp2;
+	static q31_t allpass_A,allpass_B;
+
+	static q31_t in0,in1,in2,in3;
+	static q31_t deci_out;
+
+
+
+	k = len;
+	//j0 = 1; // allpass starts with odd inputs and skips by 2
+
+
+
+	//pSrc+=1; // start looking st position 1 in the array (newer)
+	while(k > 0) { // each loop produces 2 outputs at 2X rate, so use DMALEN/8
+
+		// input/8 *2*2*(3/2)
+		in0=(*pSrc++ >> 3);
+		in1=(*pSrc++ >> 3);
+		in2=(*pSrc++ >> 3);
+		in3=(*pSrc++ >> 3);
+
+		// ***** 1st 2:1 decimator ***
+
+		// instance 1
+		// 1st order allpass stg 1, 2 instances to produce 2 outputs
+		// 1st one is non-delayed
+		// gain 2
+		state_stg1_A_zm1 = state_stg1_A_zm0;
+		state_stg1_A_zm0 = in1 - (state_stg1_A_zm1 >> 3);
+		allpass_A = state_stg1_A_zm1 + (state_stg1_A_zm0 >> 3);
+			// 1st order allpass for the delayed branch
+		state_stg1_B_zm1 = state_stg1_B_zm0;
+		state_stg1_B_zm0 = in0 - (state_stg1_B_zm1 >> 1) - (state_stg1_B_zm1 >> 4);
+		allpass_B =  state_stg1_B_zm1 + (state_stg1_B_zm0 >> 1) + (state_stg1_B_zm0 >> 4);
+		deci_stg1_out0 = allpass_B+allpass_A;
+
+		// instance 2
+		state_stg1_A_zm1 = state_stg1_A_zm0;
+		state_stg1_A_zm0 = in3 - (state_stg1_A_zm1 >> 3);
+		allpass_A = state_stg1_A_zm1 + (state_stg1_A_zm0 >> 3);
+			// 1st order allpass for the delayed branch
+		state_stg1_B_zm1 = state_stg1_B_zm0;
+		state_stg1_B_zm0 = in2 -(state_stg1_B_zm1 >> 1) - (state_stg1_B_zm1 >> 4);
+		allpass_B = state_stg1_B_zm1 + (state_stg1_B_zm0 >> 1) + (state_stg1_B_zm0 >> 4);
+		deci_stg1_out1 = allpass_B+allpass_A;
+
+
+		// at this point I've processed 4 inputs from the dma array and produced 2 outputs
+		// now for the final stg, which has a 2nd-order allpass in the
+		//un-delayed branch and a 1st-order allpass in the delayed branch (7th order elliptic)
+
+		// ***** 3rd 2:1 decimator, gain 2 ***
+
+			// 2nd order allpass
+		state_stg2_A_zm2 = state_stg2_A_zm1; // non-delayed branch
+		state_stg2_A_zm1 = state_stg2_A_zm0;
+		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_A_zm1 * coeff_d1_n1_A_stg2) >> 31);
+		mult_temp2 = (q31_t)  ( ((q63_t) state_stg2_A_zm2 * coeff_d2_n0_A_stg2) >> 31);
+		state_stg2_A_zm0 = deci_stg1_out1 - mult_temp1 - mult_temp2;
+		mult_temp2 = (q31_t)  ( ((q63_t) state_stg2_A_zm0 * coeff_d2_n0_A_stg2) >> 31);
+		//mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_A_zm1 * coeff_d1_n1_A_stg2) >> 31);
+		allpass_A = mult_temp1 + mult_temp2 + state_stg2_A_zm2;
+
+			// 1st order allpass for the delayed branch
+		state_stg2_B_zm1 = state_stg2_B_zm0;
+		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_B_zm1 * coeff_d1_n1_B_stg2) >> 31);
+		state_stg2_B_zm0 = deci_stg1_out0 - mult_temp1;
+		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_B_zm0 * coeff_d1_n1_B_stg2) >> 31);
+		allpass_B = mult_temp1 + state_stg2_B_zm1;
+
+		deci_out = allpass_B+allpass_A; // this has a gain of 1/2 from the input
+		*pDst++ =  (deci_out >> 1) + deci_out; //  -2.49 dB
+		//debugBuff[j1++] = allpass_B+allpass_A;
+
+
+
+
+
+		k--;
+
+	}
+}
+
+
+
+
+void decimate_2x_iirHB( // takes 3.2ms, new design (7/28/24) with 50dB
+	q31_t * pSrc,
+	q31_t * pDst,
+	uint32_t len) // note len is the final decimated output length, = input length/8
+{
+	uint32_t k;
+
+	// the non-delayed Allpass state-var paths are designated with _A_
+	// the delayed Allpass state-var paths are designated with _B_
+
+
+
+	static q31_t state_stg2_A_zm2=0;
+	static q31_t state_stg2_A_zm1=0;
+	static q31_t state_stg2_A_zm0=0;
+	static q31_t state_stg2_B_zm1=0;
+	static q31_t state_stg2_B_zm0=0;
+
+	static q31_t coeff_d2_n0_A_stg2 = 0x0D9C6C2D;
+	static q31_t coeff_d1_n1_A_stg2 = 0x77233802;
+	static q31_t coeff_d1_n1_B_stg2 = 0x385BACD3;
+
+	static q31_t mult_temp1;
+	static q31_t mult_temp2;
+	static q31_t allpass_A,allpass_B;
+
+	static q31_t in0,in1;
+	static q31_t deci_out;
+
+	k = len;
+	//j0 = 1; // allpass starts with odd inputs and skips by 2
+
+
+
+	//pSrc+=1; // start looking st position 1 in the array (newer)
+	while(k > 0) { // each loop produces 2 outputs at 2X rate, so use DMALEN/8
+
+		// input /4 *2*(3/2)
+		in0=(*pSrc++ >> 2);
+		in1=(*pSrc++ >> 2);
+
+			// 2nd order allpass
+		state_stg2_A_zm2 = state_stg2_A_zm1; // non-delayed branch
+		state_stg2_A_zm1 = state_stg2_A_zm0;
+		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_A_zm1 * coeff_d1_n1_A_stg2) >> 31);
+		mult_temp2 = (q31_t)  ( ((q63_t) state_stg2_A_zm2 * coeff_d2_n0_A_stg2) >> 31);
+		state_stg2_A_zm0 = in1 - mult_temp1 - mult_temp2;
+		mult_temp2 = (q31_t)  ( ((q63_t) state_stg2_A_zm0 * coeff_d2_n0_A_stg2) >> 31);
+		//mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_A_zm1 * coeff_d1_n1_A_stg2) >> 31);
+		allpass_A = mult_temp1 + mult_temp2 + state_stg2_A_zm2;
+
+			// 1st order allpass for the delayed branch
+		state_stg2_B_zm1 = state_stg2_B_zm0;
+		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_B_zm1 * coeff_d1_n1_B_stg2) >> 31);
+		state_stg2_B_zm0 = in0 - mult_temp1;
+		mult_temp1 = (q31_t)  ( ((q63_t) state_stg2_B_zm0 * coeff_d1_n1_B_stg2) >> 31);
+		allpass_B = mult_temp1 + state_stg2_B_zm1;
+
+		deci_out = allpass_B+allpass_A; // this has a gain of 1/2
+		*pDst++ =  (deci_out >> 1) + deci_out; // -2.49 dB
+		//debugBuff[j1++] = allpass_B+allpass_A;
+
+
+
+
+
+		k--;
+
+	}
+}
+
 
 
 
@@ -1188,10 +1383,9 @@ void DMA0_IRQHandler()
 			break;
 		case fs_96k_1ch: // timing test 6.7ms
 			MXC_GPIO_OutSet(gpio_out5.port,gpio_out5.mask); // timing test
+			decimate_4x_iirHB(dmaDestBuff_32bit,deci_stage1_out_left,buffLen_deci4x); // test the iir halfband
 
-			//data_converters_i24_to_q31(dmaDestBuff, dmaDestBuff_32bit, DMA_buffLen_bytes);
-			arm_fir_decimate_fast_q31_1ch(2,deci_96k_numcoeffs_0,firCoeffs_96k_0,firState_stage0_left,dmaDestBuff_32bit,deci_stage0_out_left,DMA_buffLen);
-			arm_fir_decimate_fast_q31_HB_1ch(deci_96k_numcoeffs_1,firCoeffs_96k_1,firState_stage1_left,deci_stage0_out_left,deci_stage1_out_left,buffLen_deci2x);
+
 			data_converters_q31_to_i16_24(deci_stage1_out_left,SD_write_buff+offsetDMA,buffLen_deci4x,magpie_bitdepth);
 			MXC_GPIO_OutClr(gpio_out5.port,gpio_out5.mask); // timing test
 
@@ -1199,7 +1393,9 @@ void DMA0_IRQHandler()
 		case fs_192k_1ch: // timing test 5.6 ms
 			MXC_GPIO_OutSet(gpio_out5.port,gpio_out5.mask); // timing test
 			//data_converters_i24_to_q31(dmaDestBuff, dmaDestBuff_32bit, DMA_buffLen_bytes);
-			arm_fir_decimate_fast_q31_1ch(2,deci_192k_numcoeffs_0,firCoeffs_192k_0,firState_stage0_left,dmaDestBuff_32bit,deci_stage0_out_left,DMA_buffLen);
+			decimate_2x_iirHB(dmaDestBuff_32bit,deci_stage0_out_left,buffLen_deci2x); // test the iir halfband
+
+			//arm_fir_decimate_fast_q31_1ch(2,deci_192k_numcoeffs_0,firCoeffs_192k_0,firState_stage0_left,dmaDestBuff_32bit,deci_stage0_out_left,DMA_buffLen);
 			data_converters_q31_to_i16_24(deci_stage0_out_left,SD_write_buff+offsetDMA,buffLen_deci2x,magpie_bitdepth);
 			MXC_GPIO_OutClr(gpio_out5.port,gpio_out5.mask); // timing test
 
