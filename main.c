@@ -31,6 +31,7 @@
 #include "dma.h"
 #include "arm_math.h"
 #include "./data_converters.h"
+#include "./deciFilters.h"
 #include "./periphDirectAccess.txt"
 
 
@@ -38,15 +39,15 @@
 //#define UNALIGNED_SUPPORT_DISABLE
 
 //#include "arm_fir_decimate_fast_q15_bob.h"
-#include "arm_fir_decimate_fast_q31_1ch.h"
-#include "arm_fir_decimate_fast_q31_2ch.h"
-
-#include "arm_fir_decimate_fast_q31_HB_1ch.h"
-#include "arm_fir_decimate_fast_q31_HB_2ch.h"
+//#include "arm_fir_decimate_fast_q31_1ch.h"
+//#include "arm_fir_decimate_fast_q31_2ch.h"
+//
+//#include "arm_fir_decimate_fast_q31_HB_1ch.h"
+//#include "arm_fir_decimate_fast_q31_HB_2ch.h"
 
 
 // if the following is defined,it fills the dma mem with an external file, and repeats forever to make a test signal
-#define TEST_DECIMATE
+//#define TEST_DECIMATE
 
 // RECORDING TIME IN DMA Blocks (each DMA block is 21.33 ms)
 
@@ -77,71 +78,12 @@
 #define buffLen_deci4x DMA_buffLen/4 // after 2 stages (2 - 2)
 #define buffLen_deci6x DMA_buffLen/6 // after 2 stages (3 - 2)
 #define buffLen_deci8x DMA_buffLen/8 // after 3 stages ( 2 - 2 - 2)
-#define buffLen_deci12x DMA_buffLen/12 // after 3 stages (3 - 2 - 2)
+//#define buffLen_deci12x DMA_buffLen/12 // after 3 stages (3 - 2 - 2)
 #define buffLen_deci16x DMA_buffLen/16 // after 4 stages (2 - 2 - 2 - 2)
-#define buffLen_deci24x DMA_buffLen/24 // after 4 stages (3 - 2 - 2 - 2)
-
-// magpie_new ; number of coefficients, and length of the state vector for all sample-rates
-// 16 k
-
-// decimation order: 3,2,2,2 All 2's are halfband
-#define deci_16k_numcoeffs_0 6
-#define deci_16k_numcoeffs_1 7
-#define deci_16k_numcoeffs_2 7
-#define deci_16k_numcoeffs_3 27
-
-// note filter state registers are shared between all sample-rates, so set to the laongest needed
-
-
-// 24 k
-// decimation order: 2,2,2,2 , the last 3 2's are halfband 2's are halfband
-
-#define deci_24k_numcoeffs_0 5
-#define deci_24k_numcoeffs_1 7
-#define deci_24k_numcoeffs_2 7
-#define deci_24k_numcoeffs_3 23
-
-
-
-// 32 k
-// note decimation factors are 3,2,2, the 2's are halfband
-
-#define deci_32k_numcoeffs_0 6
-#define deci_32k_numcoeffs_1 7
-#define deci_32k_numcoeffs_2 23
-
-
-// 48 k
-// decimation factors 2,2,2, the last 2 2's are hafband
-#define deci_48k_numcoeffs_0 5
-#define deci_48k_numcoeffs_1 7
-#define deci_48k_numcoeffs_2 23
-
-// 48K 33 dB for stereo mode
-#define deci_48k_numcoeffs_33dB_0 4
-#define deci_48k_numcoeffs_33dB_1 7
-#define deci_48k_numcoeffs_33dB_2 15
-
-
-// 96 k
-// decimation factors 2,2, the last section is halfband
-
-#define deci_96k_numcoeffs_0 6
-#define deci_96k_numcoeffs_1 23
-
-
-// 192 k 30 dB
-// decimation is 2, not halfband. I could use halfband but then I can't scale the input down by -3dB.
-// If this could be done before the filter, then I would switch to halfband and save mips,time
+//#define buffLen_deci24x DMA_buffLen/24 // after 4 stages (3 - 2 - 2 - 2)
 
 #define deci_192k_numcoeffs_0 11
 
-
-// try universal filter state memory to minimize memory useage (actual requirement usually lower)
-#define deci_stage0_state_len DMA_buffLen + 6 - 1
-#define deci_stage1_state_len buffLen_deci2x + 23 -1
-#define deci_stage2_state_len buffLen_deci4x + 23 -1
-#define deci_stage3_state_len buffLen_deci8x + 23 -1
 
 
 
@@ -279,10 +221,8 @@ static q31_t dmaDestBuff_32bit[DMA_buffLen] = {0}; // same data but assembled ba
 //#include "./decimate_test_sin_1k.txt" // yes
 //#include "./decimate_test_sin_xx.txt" // yes
 
-//#include "./decimate_test_16k.txt" // yes
-//#include "./decimate_test_24k.txt" // yes
-//#include "./decimate_test_32k.txt" // yes
-#include "./decimate_test_48k.txt" // yes
+#include "./decimate_test_24k.txt" // yes
+//#include "./decimate_test_48k.txt" // yes
 //#include "./decimate_test_96k.txt" // yes
 //#include "./decimate_test_192k.txt"
 #endif
@@ -297,19 +237,10 @@ int mychannel = -1;
 // magpie_new ; enumeration list for all sample-rates
 typedef enum {
 		fs_384k_1ch,
-		fs_384k_2ch,
 		fs_192k_1ch,
-		fs_192k_2ch,
 		fs_96k_1ch,
-		fs_96k_2ch,
 		fs_48k_1ch,
-		fs_48k_2ch,
-		fs_32k_1ch,
-		fs_32k_2ch,
 		fs_24k_1ch,
-		fs_24k_2ch,
-		fs_16k_1ch,
-		fs_16k_2ch
 } FS_enum; // this is a variable 'type'
 
 
@@ -330,113 +261,13 @@ static q31_t deci_stage1_out_left[buffLen_deci4x] = {0}; // 2nd decimator out, d
 static q31_t deci_stage2_out_left[buffLen_deci8x] = {0}; // 3rd decimator out, dec 8 or 12
 static q31_t deci_stage3_out_left[buffLen_deci16x] = {0}; // 4th decimator out, dec 16 or 24
 
-static q31_t deci_stage0_out_right[buffLen_deci2x] = {0}; // 1st decimator output , dec 2 or 3
-static q31_t deci_stage1_out_right[buffLen_deci4x] = {0}; // 2nd decimator out, dec 4 or 6
-static q31_t deci_stage2_out_right[buffLen_deci8x] = {0}; // 3rd decimator out, dec 8 or 12
-static q31_t deci_stage3_out_right[buffLen_deci16x] = {0}; // 4th decimator out, dec 16 or 24
 
-static q31_t ap_state_zm1=0;
-static q31_t ap_state_zm0=0;
-
-// magpie_new, all the coefficients from the Matlab program
-// 16 k
-
-static q31_t firCoeffs_16k_0[deci_16k_numcoeffs_0] = {
-66940622, 234663147, 399187040, 399187040, 234663147, 66940622};
-
-static q31_t firCoeffs_16k_1[deci_16k_numcoeffs_1] = {
--72761205, 0, 609333412, 1073741824, 609333412, 0, -72761205};
-
-static q31_t firCoeffs_16k_2[deci_16k_numcoeffs_2] = {
--93393363, 0, 624899797, 1073741824, 624899797, 0, -93393363};
-
-static q31_t firCoeffs_16k_3[deci_16k_numcoeffs_3] = {
-14350378, 0, -22432788, 0, 39696342, 0, -66842481, 0, 113185102, 0, -213099907, 0, 678529663, 1073741824, 678529663, 0, -213099907, 0, 113185102, 0, -66842481, 0, 39696342, 0, -22432788, 0, 14350378};
-
-// 24k
-
-static q31_t firCoeffs_24k_0[deci_24k_numcoeffs_0] = {
-87026071, 382177371, 589816446, 382177371, 87026071};
-
-static q31_t firCoeffs_24k_1[deci_24k_numcoeffs_1] = {
--72761205, 0, 609333412, 1073741824, 609333412, 0, -72761205};
-
-static q31_t firCoeffs_24k_2[deci_24k_numcoeffs_2] = {
--93393363, 0, 624899797, 1073741824, 624899797, 0, -93393363};
-
-static q31_t firCoeffs_24k_3[deci_24k_numcoeffs_3] = {
--24688186, 0, 36136863, 0, -63560487, 0, 110521559, 0, -211345515, 0, 677934784, 1073741824, 677934784, 0, -211345515, 0, 110521559, 0, -63560487, 0, 36136863, 0, -24688186};
-
-// 32 k
-
-
-static q31_t firCoeffs_32k_0[deci_32k_numcoeffs_0] = {
-70889607, 230467457, 380341257, 380341257, 230467457, 70889607};
-
-static q31_t firCoeffs_32k_1[deci_32k_numcoeffs_1] = {
--93393363, 0, 624899797, 1073741824, 624899797, 0, -93393363};
-
-static q31_t firCoeffs_32k_2[deci_32k_numcoeffs_2] = {
--24688186, 0, 36136863, 0, -63560487, 0, 110521559, 0, -211345515, 0, 677934784, 1073741824, 677934784, 0, -211345515, 0, 110521559, 0, -63560487, 0, 36136863, 0, -24688186};
-
-
-// 48 k hlafband
-
-
-static q31_t firCoeffs_48k_0[deci_48k_numcoeffs_0] = {
-90612570, 389972970, 596749769, 389972970, 90612570};
-
-static q31_t firCoeffs_48k_1[deci_48k_numcoeffs_1] = {
--93393363, 0, 624899797, 1073741824, 624899797, 0, -93393363};
-
-static q31_t firCoeffs_48k_2[deci_48k_numcoeffs_2] = {
--24688186, 0, 36136863, 0, -63560487, 0, 110521559, 0, -211345515, 0, 677934784, 1073741824, 677934784, 0, -211345515, 0, 110521559, 0, -63560487, 0, 36136863, 0, -24688186};
-
-
-
-// 48k relaxed 32 dB stopband for stereo
-
-
-static q31_t firCoeffs_48k_33dB_0[deci_48k_numcoeffs_33dB_0] = {
-197220280, 575961099, 575961099, 197220280};
-
-static q31_t firCoeffs_48k_33dB_1[deci_48k_numcoeffs_33dB_1] = {
--93393363, 0, 624899797, 1073741824, 624899797, 0, -93393363};
-
-static q31_t firCoeffs_48k_33dB_2[deci_48k_numcoeffs_33dB_2] = {
--77203754, 0, 103736529, 0, -206802927, 0, 676321746, 1073741824, 676321746, 0, -206802927, 0, 103736529, 0, -77203754};
-
-
-
-
-// 96 k
-
-
-static q31_t firCoeffs_96k_0[deci_96k_numcoeffs_0] = {
--10807389, 213981735, 614165432, 614165432, 213981735, -10807389};
-
-static q31_t firCoeffs_96k_1[deci_96k_numcoeffs_1] = {
--24688186, 0, 36136863, 0, -63560487, 0, 110521559, 0, -211345515, 0, 677934784, 1073741824, 677934784, 0, -211345515, 0, 110521559, 0, -63560487, 0, 36136863, 0, -24688186};
-
-
-// 192 k
-
-static q31_t firCoeffs_192k_0[deci_192k_numcoeffs_0] = {
-70537572, 3275316, -138383646, 1734727, 471760716, 762876425, 471760716, 1734727, -138383646, 3275316, 70537572};
+//static q31_t ap_state_zm1=0;
+//static q31_t ap_state_zm0=0;
 
 
 // magpie_new , filter state variables as required by the cmsis functions, for all sample-rates.
 
-// universal state filter arrays , set to largest needed across sample-rates
-static q31_t firState_stage0_left[deci_stage0_state_len] = {0};
-static q31_t firState_stage1_left[deci_stage1_state_len] = {0};
-static q31_t firState_stage2_left[deci_stage2_state_len] = {0};
-static q31_t firState_stage3_left[deci_stage3_state_len] = {0};
-
-static q31_t firState_stage0_right[deci_stage0_state_len] = {0};
-static q31_t firState_stage1_right[deci_stage1_state_len] = {0};
-static q31_t firState_stage2_right[deci_stage2_state_len] = {0};
-static q31_t firState_stage3_right[deci_stage3_state_len] = {0};
 
 
 int location = 0;
@@ -915,351 +746,6 @@ void copy_dec_by_2(const q31_t *A, q31_t *B,uint32_t size) {
 }
 
 
-void decimate_8x_iirHB( // takes 1.7ms, new design (7/28/24) with 50dB
-	q31_t * pSrc,
-	q31_t * pDst,
-	uint32_t len) // note len is the final decimated output length, = input length/8
-{
-	uint32_t k;
-	static q31_t state_stg0_zm1=0; // 1st number os decimation stg
-	static q31_t state_stg0_zm0=0;
-
-	// the non-delayed Allpass state-var paths are designated with _A_
-	// the delayed Allpass state-var paths are designated with _B_
-
-	static q31_t state_stg1_A_zm1=0;
-	static q31_t state_stg1_A_zm0=0;
-	static q31_t state_stg1_B_zm1=0;
-	static q31_t state_stg1_B_zm0=0;
-
-	static q31_t state_stg2_A_zm2=0;
-	static q31_t state_stg2_A_zm1=0;
-	static q31_t state_stg2_A_zm0=0;
-	static q31_t state_stg2_B_zm1=0;
-	static q31_t state_stg2_B_zm0=0;
-
-	static q31_t deci_stg0_out0 = 0;
-	static q31_t deci_stg0_out1 = 0;
-	static q31_t deci_stg0_out2 = 0;
-	static q31_t deci_stg0_out3 = 0;
-
-	static q31_t deci_stg1_out0 = 0;
-	static q31_t deci_stg1_out1 = 0;
-
-	static q31_t coeff_d2_n0_A_stg2 = 0x0D9C6C2D;
-	static q31_t coeff_d1_n1_A_stg2 = 0x77233802;
-	static q31_t coeff_d1_n1_B_stg2 = 0x385BACD3;
-	static q31_t mult_temp1;
-	static q31_t mult_temp2;
-	static q31_t allpass_A,allpass_B;
-
-	static q31_t in0,in1,in2,in3,in4,in5,in6,in7;
-	static q31_t deci_out;
-
-
-
-	k = len;
-	//j0 = 1; // allpass starts with odd inputs and skips by 2
-
-
-
-	//pSrc+=1; // start looking st position 1 in the array (newer)
-	while(k > 0) { // each loop produces 2 outputs at 2X rate, so use DMALEN/8
-
-		// input is divided by 16, then gain by 2*2*2, then gain by (1 + 1/2), 1/2*3/2 = 3/4 = -2.49 dB
-		in0=(*pSrc++ >> 4);
-		in1=(*pSrc++ >> 4);
-		in2=(*pSrc++ >> 4);
-		in3=(*pSrc++ >> 4);
-		in4=(*pSrc++ >> 4);
-		in5=(*pSrc++ >> 4);
-		in6=(*pSrc++ >> 4);
-		in7=(*pSrc++ >> 4);
-
-
-		// 1st stage comes from 3rd order elliptc prototype, 1st-order in non-delayed branch
-		// ***** 1st 2:1 decimator, gain = 2 ***
-
-		// 1st shift the zm1 to zm0 based on the current zm1 value
-		state_stg0_zm1 = state_stg0_zm0;
-		state_stg0_zm0 = in1 - (state_stg0_zm1 >> 2) - (state_stg0_zm1 >> 4) - (state_stg0_zm1 >> 5); // scale input by 1/2 so the output does not need to be scaled by 1/2
-		deci_stg0_out0 = state_stg0_zm1 + (state_stg0_zm0 >> 2) + (state_stg0_zm0 >> 4) + (state_stg0_zm0 >> 5 )+ in0;
-
-		state_stg0_zm1 = state_stg0_zm0;
-		state_stg0_zm0 = in3 - (state_stg0_zm1 >> 2) - (state_stg0_zm1 >> 4) - (state_stg0_zm1 >> 5); // scale input by 1/2 so the output does not need to be scaled by 1/2
-		deci_stg0_out1 = state_stg0_zm1 + (state_stg0_zm0 >> 2) + (state_stg0_zm0 >> 4)+ (state_stg0_zm0 >> 5) + in2;
-
-
-		state_stg0_zm1 = state_stg0_zm0;
-		state_stg0_zm0 = in5 - (state_stg0_zm1 >> 2) - (state_stg0_zm1 >> 4)- (state_stg0_zm1 >> 5); // scale input by 1/2 so the output does not need to be scaled by 1/2
-		deci_stg0_out2 = state_stg0_zm1 + (state_stg0_zm0 >> 2) + (state_stg0_zm0 >> 4)+ (state_stg0_zm0 >> 5)  + in4;
-
-
-		state_stg0_zm1 = state_stg0_zm0;
-		state_stg0_zm0 = in7 - (state_stg0_zm1 >> 2) - (state_stg0_zm1 >> 4)- (state_stg0_zm1 >> 5); // scale input by 1/2 so the output does not need to be scaled by 1/2
-		deci_stg0_out3 = state_stg0_zm1 + (state_stg0_zm0 >> 2) + (state_stg0_zm0 >> 4)+ (state_stg0_zm0 >> 5)  + in6;
-
-
-
-		// at this point I've processed 8 inputs from the dma array and produced 4 outputs
-		// now take 4 outputs and use the same filter as above to produce 2 outputs
-		// this stage has a 1st-order allpass in both delayed and non-delayed branches (from 5th-order elliptic prototype)
-
-		// ***** 2nd 2:1 decimator ***
-
-		// instance 1
-		// 1st order allpass stg 1, 2 instances to produce 2 outputs
-		// 1st one is non-delayed
-		// gain = 2
-		state_stg1_A_zm1 = state_stg1_A_zm0;
-		state_stg1_A_zm0 = deci_stg0_out1 - (state_stg1_A_zm1 >> 3);
-		allpass_A = state_stg1_A_zm1 + (state_stg1_A_zm0 >> 3);
-			// 1st order allpass for the delayed branch
-		state_stg1_B_zm1 = state_stg1_B_zm0;
-		state_stg1_B_zm0 = deci_stg0_out0  - (state_stg1_B_zm1 >> 1) - (state_stg1_B_zm1 >> 4);
-		allpass_B =  state_stg1_B_zm1 + (state_stg1_B_zm0 >> 1) + (state_stg1_B_zm0 >> 4);
-		deci_stg1_out0 = allpass_B+allpass_A;
-
-		// instance 2
-		state_stg1_A_zm1 = state_stg1_A_zm0;
-		state_stg1_A_zm0 = deci_stg0_out3 - (state_stg1_A_zm1 >> 3);
-		allpass_A = state_stg1_A_zm1 + (state_stg1_A_zm0 >> 3);
-			// 1st order allpass for the delayed branch
-		state_stg1_B_zm1 = state_stg1_B_zm0;
-		state_stg1_B_zm0 = deci_stg0_out2 -(state_stg1_B_zm1 >> 1) - (state_stg1_B_zm1 >> 4);
-		allpass_B = state_stg1_B_zm1 + (state_stg1_B_zm0 >> 1) + (state_stg1_B_zm0 >> 4);
-		deci_stg1_out1 = allpass_B+allpass_A;
-
-
-		// at this point I've processed 8 inputs from the dma array and produced 2 outputs
-		// now for the final stg, which has a 2nd-order allpass in the
-		//un-delayed branch and a 1st-order allpass in the delayed branch (7th order elliptic)
-
-		// ***** 3rd 2:1 decimator ***
-		// gain 2
-			// 2nd order allpass
-		state_stg2_A_zm2 = state_stg2_A_zm1; // non-delayed branch
-		state_stg2_A_zm1 = state_stg2_A_zm0;
-		// faster to shift mult result right by 32 and then left by 1
-		mult_temp1 = ((q31_t)  ( ((q63_t) state_stg2_A_zm1 * coeff_d1_n1_A_stg2) >> 32)) << 1;
-		mult_temp2 = ((q31_t)  ( ((q63_t) state_stg2_A_zm2 * coeff_d2_n0_A_stg2) >> 32)) << 1;
-		state_stg2_A_zm0 = deci_stg1_out1 - mult_temp1 - mult_temp2;
-		mult_temp2 = ((q31_t)  ( ((q63_t) state_stg2_A_zm0 * coeff_d2_n0_A_stg2) >> 32)) << 1;
-		allpass_A = mult_temp1 + mult_temp2 + state_stg2_A_zm2;
-
-			// 1st order allpass for the delayed branch
-		state_stg2_B_zm1 = state_stg2_B_zm0;
-		mult_temp1 = ((q31_t)  ( ((q63_t) state_stg2_B_zm1 * coeff_d1_n1_B_stg2) >> 32)) << 1;
-		state_stg2_B_zm0 = deci_stg1_out0 - mult_temp1;
-		mult_temp1 = ((q31_t)  ( ((q63_t) state_stg2_B_zm0 * coeff_d1_n1_B_stg2) >> 32)) << 1;
-		allpass_B = mult_temp1 + state_stg2_B_zm1;
-
-		deci_out = allpass_B+allpass_A; // this has a gain of 1/4 from the input
-		*pDst++ =  (deci_out >> 1) + deci_out; // 20*log10((1/4)*(2 + 1)) = -2.49 dB
-		//debugBuff[j1++] = allpass_B+allpass_A;
-
-
-
-
-
-		k--;
-
-	}
-}
-
-
-
-
-
-void decimate_4x_iirHB( // takes 1.6ms, new design (7/28/24) with 50dB
-	q31_t * pSrc,
-	q31_t * pDst,
-	uint32_t len) // note len is the final decimated output length, = input length/8
-{
-	uint32_t k;
-
-	// the non-delayed Allpass state-var paths are designated with _A_
-	// the delayed Allpass state-var paths are designated with _B_
-
-	static q31_t state_stg1_A_zm1=0;
-	static q31_t state_stg1_A_zm0=0;
-	static q31_t state_stg1_B_zm1=0;
-	static q31_t state_stg1_B_zm0=0;
-
-	static q31_t state_stg2_A_zm2=0;
-	static q31_t state_stg2_A_zm1=0;
-	static q31_t state_stg2_A_zm0=0;
-	static q31_t state_stg2_B_zm1=0;
-	static q31_t state_stg2_B_zm0=0;
-
-
-	static q31_t deci_stg1_out0 = 0;
-	static q31_t deci_stg1_out1 = 0;
-	static q31_t coeff_d2_n0_A_stg2 = 0x0D9C6C2D;
-	static q31_t coeff_d1_n1_A_stg2 = 0x77233802;
-	static q31_t coeff_d1_n1_B_stg2 = 0x385BACD3;
-
-	static q31_t mult_temp1;
-	static q31_t mult_temp2;
-	static q31_t allpass_A,allpass_B;
-
-	static q31_t in0,in1,in2,in3;
-	static q31_t deci_out;
-
-
-
-	k = len;
-	//j0 = 1; // allpass starts with odd inputs and skips by 2
-
-
-
-	//pSrc+=1; // start looking st position 1 in the array (newer)
-	while(k > 0) { // each loop produces 2 outputs at 2X rate, so use DMALEN/8
-
-		// input/8 *2*2*(3/2)
-		in0=(*pSrc++ >> 3);
-		in1=(*pSrc++ >> 3);
-		in2=(*pSrc++ >> 3);
-		in3=(*pSrc++ >> 3);
-
-		// ***** 1st 2:1 decimator ***
-
-		// instance 1
-		// 1st order allpass stg 1, 2 instances to produce 2 outputs
-		// 1st one is non-delayed
-		// gain 2
-		state_stg1_A_zm1 = state_stg1_A_zm0;
-		state_stg1_A_zm0 = in1 - (state_stg1_A_zm1 >> 3);
-		allpass_A = state_stg1_A_zm1 + (state_stg1_A_zm0 >> 3);
-			// 1st order allpass for the delayed branch
-		state_stg1_B_zm1 = state_stg1_B_zm0;
-		state_stg1_B_zm0 = in0 - (state_stg1_B_zm1 >> 1) - (state_stg1_B_zm1 >> 4);
-		allpass_B =  state_stg1_B_zm1 + (state_stg1_B_zm0 >> 1) + (state_stg1_B_zm0 >> 4);
-		deci_stg1_out0 = allpass_B+allpass_A;
-
-		// instance 2
-		state_stg1_A_zm1 = state_stg1_A_zm0;
-		state_stg1_A_zm0 = in3 - (state_stg1_A_zm1 >> 3);
-		allpass_A = state_stg1_A_zm1 + (state_stg1_A_zm0 >> 3);
-			// 1st order allpass for the delayed branch
-		state_stg1_B_zm1 = state_stg1_B_zm0;
-		state_stg1_B_zm0 = in2 -(state_stg1_B_zm1 >> 1) - (state_stg1_B_zm1 >> 4);
-		allpass_B = state_stg1_B_zm1 + (state_stg1_B_zm0 >> 1) + (state_stg1_B_zm0 >> 4);
-		deci_stg1_out1 = allpass_B+allpass_A;
-
-
-		// at this point I've processed 4 inputs from the dma array and produced 2 outputs
-		// now for the final stg, which has a 2nd-order allpass in the
-		//un-delayed branch and a 1st-order allpass in the delayed branch (7th order elliptic)
-
-		// ***** 3rd 2:1 decimator, gain 2 ***
-
-
-
-			// 2nd order allpass
-		state_stg2_A_zm2 = state_stg2_A_zm1; // non-delayed branch
-		state_stg2_A_zm1 = state_stg2_A_zm0;
-		mult_temp1 = ((q31_t)  ( ((q63_t) state_stg2_A_zm1 * coeff_d1_n1_A_stg2) >> 32)) << 1;
-		mult_temp2 = ((q31_t)  ( ((q63_t) state_stg2_A_zm2 * coeff_d2_n0_A_stg2) >> 32)) << 1;
-		state_stg2_A_zm0 = deci_stg1_out1 - mult_temp1 - mult_temp2;
-		mult_temp2 = ((q31_t)  ( ((q63_t) state_stg2_A_zm0 * coeff_d2_n0_A_stg2) >> 32)) << 1;
-		allpass_A = mult_temp1 + mult_temp2 + state_stg2_A_zm2;
-
-			// 1st order allpass for the delayed branch
-		state_stg2_B_zm1 = state_stg2_B_zm0;
-		mult_temp1 = ((q31_t)  ( ((q63_t) state_stg2_B_zm1 * coeff_d1_n1_B_stg2) >> 32)) << 1;
-		state_stg2_B_zm0 = deci_stg1_out0 - mult_temp1;
-		mult_temp1 = ((q31_t)  ( ((q63_t) state_stg2_B_zm0 * coeff_d1_n1_B_stg2) >> 32)) << 1;
-		allpass_B = mult_temp1 + state_stg2_B_zm1;
-
-		deci_out = allpass_B+allpass_A; // this has a gain of 1/2 from the input
-		*pDst++ =  (deci_out >> 1) + deci_out; //  -2.49 dB
-		//debugBuff[j1++] = allpass_B+allpass_A;
-
-
-
-
-
-		k--;
-
-	}
-}
-
-
-
-
-void decimate_2x_iirHB( // takes 3.2ms, new design (7/28/24) with 50dB
-	q31_t * pSrc,
-	q31_t * pDst,
-	uint32_t len) // note len is the final decimated output length, = input length/8
-{
-	uint32_t k;
-
-	// the non-delayed Allpass state-var paths are designated with _A_
-	// the delayed Allpass state-var paths are designated with _B_
-
-
-
-	static q31_t state_stg2_A_zm2=0;
-	static q31_t state_stg2_A_zm1=0;
-	static q31_t state_stg2_A_zm0=0;
-	static q31_t state_stg2_B_zm1=0;
-	static q31_t state_stg2_B_zm0=0;
-
-	static q31_t coeff_d2_n0_A_stg2 = 0x0D9C6C2D;
-	static q31_t coeff_d1_n1_A_stg2 = 0x77233802;
-	static q31_t coeff_d1_n1_B_stg2 = 0x385BACD3;
-
-	static q31_t mult_temp1;
-	static q31_t mult_temp2;
-	static q31_t allpass_A,allpass_B;
-
-	static q31_t in0,in1;
-	static q31_t deci_out;
-
-	k = len;
-	//j0 = 1; // allpass starts with odd inputs and skips by 2
-
-
-
-	//pSrc+=1; // start looking st position 1 in the array (newer)
-	while(k > 0) { // each loop produces 2 outputs at 2X rate, so use DMALEN/8
-
-		// input /4 *2*(3/2)
-		in0=(*pSrc++ >> 2);
-		in1=(*pSrc++ >> 2);
-
-			// 2nd order allpass
-		state_stg2_A_zm2 = state_stg2_A_zm1; // non-delayed branch
-		state_stg2_A_zm1 = state_stg2_A_zm0;
-		mult_temp1 = ((q31_t)  ( ((q63_t) state_stg2_A_zm1 * coeff_d1_n1_A_stg2) >> 32)) << 1;
-		mult_temp2 = ((q31_t)  ( ((q63_t) state_stg2_A_zm2 * coeff_d2_n0_A_stg2) >> 32)) << 1;
-		state_stg2_A_zm0 = in1 - mult_temp1 - mult_temp2;
-		mult_temp2 = ((q31_t)  ( ((q63_t) state_stg2_A_zm0 * coeff_d2_n0_A_stg2) >> 32)) << 1;
-		allpass_A = mult_temp1 + mult_temp2 + state_stg2_A_zm2;
-
-			// 1st order allpass for the delayed branch
-		state_stg2_B_zm1 = state_stg2_B_zm0;
-		mult_temp1 = ((q31_t)  ( ((q63_t) state_stg2_B_zm1 * coeff_d1_n1_B_stg2) >> 32)) << 1;
-		state_stg2_B_zm0 = in0 - mult_temp1;
-		mult_temp1 = ((q31_t)  ( ((q63_t) state_stg2_B_zm0 * coeff_d1_n1_B_stg2) >> 32)) << 1;
-		allpass_B = mult_temp1 + state_stg2_B_zm1;
-
-		deci_out = allpass_B+allpass_A; // this has a gain of 1/2
-		*pDst++ =  (deci_out >> 1) + deci_out; // -2.49 dB
-		//debugBuff[j1++] = allpass_B+allpass_A;
-
-
-
-
-
-		k--;
-
-	}
-}
-
-
-
 
 
 
@@ -1304,16 +790,7 @@ void DMA0_IRQHandler()
 		dmaByte2 = dmaDestBuff[i++]; //ms byte
 		dmaByte1 = dmaDestBuff[i++]; //mid byte
 		dmaByte0 = dmaDestBuff[i++]; //ls byte
-		dmaDestBuff_32bit[j]  = (q31_t)((dmaByte2 << 24) | (dmaByte1 << 16) | (dmaByte0 << 8)); // use for 24-bit case
-		if(j & 0x00000001) { // odd sample, do allpass
-			// 1st shift the zm1 to zm0 based on the current zm1 value
-			ap_state_zm1 = ap_state_zm0;
-			ap_state_zm0 = (dmaDestBuff_32bit[j] >> 1) - (ap_state_zm1 >> 2) - (ap_state_zm1 >> 3); // scale input by 1/2 so the output does not need to be scaled by 1/2
-			deci_stage0_out_left[jj++] = ap_state_zm1 + (ap_state_zm0 >> 2) + (ap_state_zm0 >> 3) + dmaDestBuff_32bit[j-1];
-
-		}
-		j++;
-
+		dmaDestBuff_32bit[j++]  = (q31_t)((dmaByte2 << 24) | (dmaByte1 << 16) | (dmaByte0 << 8)); // use for 24-bit case
 		k--;
 
 	}
@@ -1324,31 +801,11 @@ void DMA0_IRQHandler()
 
 	switch(magpie_FS) { // do the correct filter for each sample-rate
 
-		case fs_16k_1ch: // timing test, 5ms
-			MXC_GPIO_OutSet(gpio_out5.port,gpio_out5.mask); // timing test
-			arm_fir_decimate_fast_q31_1ch(2,deci_16k_numcoeffs_0,firCoeffs_16k_0,firState_stage0_left,dmaDestBuff_32bit,deci_stage0_out_left,DMA_buffLen);// use 2x buffer to save mem (dont need a 3x buffer)
-			arm_fir_decimate_fast_q31_HB_1ch(deci_16k_numcoeffs_1,firCoeffs_16k_1,firState_stage1_left,deci_stage0_out_left,deci_stage1_out_left,buffLen_deci3x);
-			arm_fir_decimate_fast_q31_HB_1ch(deci_16k_numcoeffs_2,firCoeffs_16k_2,firState_stage2_left,deci_stage1_out_left,deci_stage2_out_left,buffLen_deci6x);
-			arm_fir_decimate_fast_q31_HB_1ch(deci_16k_numcoeffs_3,firCoeffs_16k_3,firState_stage3_left,deci_stage2_out_left,deci_stage3_out_left,buffLen_deci12x);
-			data_converters_q31_to_i16_24(deci_stage3_out_left,SD_write_buff+offsetDMA,buffLen_deci24x,magpie_bitdepth);
-			MXC_GPIO_OutClr(gpio_out5.port,gpio_out5.mask); // timing test
-			break;
-		case fs_24k_1ch: // timing test 6.5 ms
-			MXC_GPIO_OutSet(gpio_out5.port,gpio_out5.mask); // timing test
-			arm_fir_decimate_fast_q31_1ch(2,deci_24k_numcoeffs_0,firCoeffs_24k_0,firState_stage0_left,dmaDestBuff_32bit,deci_stage0_out_left,DMA_buffLen);
-			arm_fir_decimate_fast_q31_HB_1ch(deci_24k_numcoeffs_1,firCoeffs_24k_1,firState_stage1_left,deci_stage0_out_left,deci_stage1_out_left,buffLen_deci2x);
-			arm_fir_decimate_fast_q31_HB_1ch(deci_24k_numcoeffs_2,firCoeffs_24k_2,firState_stage2_left,deci_stage1_out_left,deci_stage2_out_left,buffLen_deci4x);
-			arm_fir_decimate_fast_q31_HB_1ch(deci_24k_numcoeffs_3,firCoeffs_24k_3,firState_stage3_left,deci_stage2_out_left,deci_stage3_out_left,buffLen_deci8x);
-			data_converters_q31_to_i16_24(deci_stage3_out_left,SD_write_buff+offsetDMA,buffLen_deci16x,magpie_bitdepth);
-			MXC_GPIO_OutClr(gpio_out5.port,gpio_out5.mask); // timing test
 
-			break;
-		case fs_32k_1ch: // timing test 4.8 ms
+		case fs_24k_1ch:
 			MXC_GPIO_OutSet(gpio_out5.port,gpio_out5.mask); // timing test
-			arm_fir_decimate_fast_q31_1ch(2,deci_32k_numcoeffs_0,firCoeffs_32k_0,firState_stage0_left,dmaDestBuff_32bit,deci_stage0_out_left,DMA_buffLen); // use 2x buffer to save mem (dont need a 3x buffer)
-			arm_fir_decimate_fast_q31_HB_1ch(deci_16k_numcoeffs_1,firCoeffs_16k_1,firState_stage1_left,deci_stage0_out_left,deci_stage1_out_left,buffLen_deci3x);
-			arm_fir_decimate_fast_q31_HB_1ch(deci_16k_numcoeffs_2,firCoeffs_16k_2,firState_stage2_left,deci_stage1_out_left,deci_stage2_out_left,buffLen_deci6x);
-			data_converters_q31_to_i16_24(deci_stage2_out_left,SD_write_buff+offsetDMA,buffLen_deci12x,magpie_bitdepth);
+			decimate_16x_iirHB(dmaDestBuff_32bit,deci_stage3_out_left,buffLen_deci16x); // test the iir halfband
+			data_converters_q31_to_i16_24(deci_stage3_out_left,SD_write_buff+offsetDMA,buffLen_deci16x,magpie_bitdepth);
 			MXC_GPIO_OutClr(gpio_out5.port,gpio_out5.mask); // timing test
 
 			break;
@@ -1358,44 +815,20 @@ void DMA0_IRQHandler()
 
 			// NEW and much faster ...
 			decimate_8x_iirHB(dmaDestBuff_32bit,deci_stage2_out_left,buffLen_deci8x); // test the iir halfband
-
 			data_converters_q31_to_i16_24(deci_stage2_out_left,SD_write_buff+offsetDMA,buffLen_deci8x,magpie_bitdepth);
 			MXC_GPIO_OutClr(gpio_out5.port,gpio_out5.mask); // timing test
-
 			break;
 
-		case fs_48k_2ch:
-			// 11ms
-			MXC_GPIO_OutSet(gpio_out5.port,gpio_out5.mask); // timing test
 
-			//data_converters_i24_to_q31(dmaDestBuff, dmaDestBuff_32bit, DMA_buffLen_bytes);
-			// test the halfband, length 7
-			arm_fir_decimate_fast_q31_2ch(2,deci_48k_numcoeffs_33dB_0,firCoeffs_48k_33dB_0,firState_stage0_left,firState_stage0_right,dmaDestBuff_32bit,deci_stage0_out_left,dmaDestBuff_32bit,deci_stage0_out_right,DMA_buffLen);
-			arm_fir_decimate_fast_q31_HB_2ch(deci_48k_numcoeffs_33dB_1,firCoeffs_48k_33dB_1,firState_stage1_left,firState_stage1_right,deci_stage0_out_left,deci_stage1_out_left,deci_stage0_out_right,deci_stage1_out_right,buffLen_deci2x);
-			arm_fir_decimate_fast_q31_HB_2ch(deci_48k_numcoeffs_33dB_2,firCoeffs_48k_33dB_2,firState_stage2_left,firState_stage2_right,deci_stage1_out_left,deci_stage2_out_left,deci_stage1_out_right,deci_stage2_out_right,buffLen_deci4x);
-
-			// debug, un-comment 1 of the following 2 lines to select the channel tp write to sd
-			data_converters_q31_to_i16_24(deci_stage2_out_left,SD_write_buff+offsetDMA,buffLen_deci8x,magpie_bitdepth);
-			//data_converters_q31_to_i16_24(deci_stage2_out_right,SD_write_buff+offsetDMA,buffLen_deci8x,magpie_bitdepth);
-
-			MXC_GPIO_OutClr(gpio_out5.port,gpio_out5.mask); // timing test
-
-			break;
 		case fs_96k_1ch: // timing test 6.7ms
 			MXC_GPIO_OutSet(gpio_out5.port,gpio_out5.mask); // timing test
 			decimate_4x_iirHB(dmaDestBuff_32bit,deci_stage1_out_left,buffLen_deci4x); // test the iir halfband
-
-
 			data_converters_q31_to_i16_24(deci_stage1_out_left,SD_write_buff+offsetDMA,buffLen_deci4x,magpie_bitdepth);
 			MXC_GPIO_OutClr(gpio_out5.port,gpio_out5.mask); // timing test
-
 			break;
 		case fs_192k_1ch: // timing test 5.6 ms
 			MXC_GPIO_OutSet(gpio_out5.port,gpio_out5.mask); // timing test
-			//data_converters_i24_to_q31(dmaDestBuff, dmaDestBuff_32bit, DMA_buffLen_bytes);
 			decimate_2x_iirHB(dmaDestBuff_32bit,deci_stage0_out_left,buffLen_deci2x); // test the iir halfband
-
-			//arm_fir_decimate_fast_q31_1ch(2,deci_192k_numcoeffs_0,firCoeffs_192k_0,firState_stage0_left,dmaDestBuff_32bit,deci_stage0_out_left,DMA_buffLen);
 			data_converters_q31_to_i16_24(deci_stage0_out_left,SD_write_buff+offsetDMA,buffLen_deci2x,magpie_bitdepth);
 			MXC_GPIO_OutClr(gpio_out5.port,gpio_out5.mask); // timing test
 
@@ -1419,9 +852,6 @@ void DMA0_IRQHandler()
 			break;
 	}
 
-
-
-	//	MXC_GPIO_OutClr(gpio_out5.port,gpio_out5.mask); // timing test
 
 
 
@@ -1510,31 +940,19 @@ int main(void)
 	// magpie_new - set the number of bytes to write according to the sample-rate; also set the modulo for the spi slow-write scheme
 	switch(magpie_FS) {
 
-		case fs_16k_1ch:
-			FS = 16000;
-			if(magpie_bitdepth) numBytesSDwrite = 3*buffLen_deci24x; else numBytesSDwrite = 2*buffLen_deci24x;
-			block_ptr_modulo_mask = 0x00000007;
-			break;
+
 		case fs_24k_1ch:
 			FS = 24000;
 			if(magpie_bitdepth) numBytesSDwrite = 3*buffLen_deci16x; else numBytesSDwrite = 2*buffLen_deci16x;
 			block_ptr_modulo_mask = 0x00000007;
 			break;
-		case fs_32k_1ch:
-			FS = 32000;
-			if(magpie_bitdepth) numBytesSDwrite = 3*buffLen_deci12x; else numBytesSDwrite = 2*buffLen_deci12x;
-			block_ptr_modulo_mask = 0x000000007;
-			break;
+
 		case fs_48k_1ch:
 			FS = 48000;
 			if(magpie_bitdepth) numBytesSDwrite = 3*buffLen_deci8x; else numBytesSDwrite = 2*buffLen_deci8x;
 			block_ptr_modulo_mask = 0x000000007;
 			break;
-		case fs_48k_2ch:
-			FS = 48000;
-			if(magpie_bitdepth) numBytesSDwrite = 3*buffLen_deci8x; else numBytesSDwrite = 2*buffLen_deci8x;
-			block_ptr_modulo_mask = 0x000000007;
-			break;
+
 		case fs_96k_1ch:
 			FS = 96000;
 			if(magpie_bitdepth) numBytesSDwrite = 3*buffLen_deci4x; else numBytesSDwrite = 2*buffLen_deci4x;
